@@ -21,6 +21,7 @@ use time::OffsetDateTime;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+use crate::access::{self, AccessMode, Gate, GateIdentity};
 use crate::crypto::Crypto;
 use crate::error::{is_unique_violation, ApiError, ApiResult};
 use crate::extract::JsonBody;
@@ -107,9 +108,7 @@ fn bearer_token(parts: &Parts) -> Option<&str> {
 /// Tokens are 32 bytes base64url → exactly 43 URL-safe chars; reject anything else without
 /// touching the database.
 fn plausible_token(t: &str) -> bool {
-    t.len() == 43
-        && t.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    ids::is_token_shape(t)
 }
 
 const AUTH_SQL: &str = "
@@ -391,7 +390,7 @@ pub async fn signup_allowed(state: &SharedState) -> ApiResult<bool> {
         .unwrap_or(state.cfg.allow_signup))
 }
 
-async fn upsert_device(
+pub(crate) async fn upsert_device(
     tx: &mut sqlx::PgConnection,
     user_id: Uuid,
     input: Option<DeviceInput>,
@@ -412,7 +411,7 @@ async fn upsert_device(
     .await?)
 }
 
-async fn create_session(
+pub(crate) async fn create_session(
     tx: &mut sqlx::PgConnection,
     user_id: Uuid,
     device_id: Uuid,
@@ -433,23 +432,64 @@ async fn create_session(
     Ok(token)
 }
 
+/// Signup policy for this request's gate credential:
+///
+/// * an access key always implies permission, but an email-bound key only for its email
+///   (403 `access_key_email`);
+/// * `directory` mode requires an access key (403 `access_key_required`);
+/// * the shared instance key (open mode) follows [`signup_allowed`] (403 `forbidden`).
+///
+/// Returns the access key to charge one use against.
+async fn check_signup_gate(
+    state: &SharedState,
+    gate: Option<&GateIdentity>,
+    email: &str,
+) -> ApiResult<Option<Uuid>> {
+    if let Some((key_id, bound)) = gate.and_then(GateIdentity::access_key) {
+        if bound.is_some_and(|b| b.to_lowercase() != email.to_lowercase()) {
+            return Err(ApiError::Denied {
+                code: "access_key_email",
+                message: "this access key is for a different email address",
+            });
+        }
+        return Ok(Some(key_id));
+    }
+    if access::access_mode(state).await? == AccessMode::Directory {
+        return Err(ApiError::Denied {
+            code: "access_key_required",
+            message: "signup on this instance needs a personal access key from the admin",
+        });
+    }
+    if !signup_allowed(state).await? {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(None)
+}
+
 async fn signup(
     State(state): State<SharedState>,
+    Gate(gate): Gate,
     JsonBody(req): JsonBody<SignupRequest, AUTH_BODY_LIMIT>,
 ) -> ApiResult<Json<SessionResponse>> {
     let email = normalize_email(&req.email)?;
     validate_password(&req.password)?;
     let display_name = clean_name(req.display_name.as_deref(), 200)
         .unwrap_or_else(|| default_display_name(&email));
-    if !signup_allowed(&state).await? {
-        return Err(ApiError::Forbidden);
-    }
+    let key_id = check_signup_gate(&state, gate.as_ref(), &email).await?;
     if user_id_by_email(&state.db, &email).await?.is_some() {
         return Err(email_taken());
     }
     let password_hash = hash_password(req.password).await?;
 
     let mut tx = state.db.begin().await?;
+    if let Some(key_id) = key_id {
+        if !access::claim_signup_use(&mut tx, key_id).await? {
+            return Err(ApiError::Denied {
+                code: "access_key_exhausted",
+                message: "this access key cannot create more accounts",
+            });
+        }
+    }
     let user = insert_user(
         &mut tx,
         &state.crypto,

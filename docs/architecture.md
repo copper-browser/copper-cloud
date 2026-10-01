@@ -16,8 +16,9 @@
 
 | Crate | Role |
 |---|---|
-| `crates/copper-cloud` (bin + lib) | CLI (clap), `serve` bootstrap, graceful shutdown, `doctor`, `admin`, migrations dir |
-| `crates/core` (`copper-cloud-core`) | config, db pool + embedded migrations, crypto, auth extractor + routes, sync docs/history/SSE, events, TLS, link codes, observability, app composition |
+| `crates/copper-cloud` (bin + lib) | CLI (clap), `serve` bootstrap, graceful shutdown, `doctor`, `admin`, admin API (`/admin/api`), embedded admin portal (rust-embed of `portal/out`), migrations dir |
+| `crates/core` (`copper-cloud-core`) | config, db pool + embedded migrations, crypto, access mode + access keys + gate, auth extractor + routes, pairing codes, sync docs/history/SSE, events, TLS, link codes, observability, app composition |
+| `portal/` | Next.js static export (the admin portal), built with bun into `portal/out` before cargo in CI/release |
 | `crates/canvas` (`copper-cloud-canvas`) | canvases REST + Yjs rooms (see [canvas.md](canvas.md)) |
 
 Stack: tokio, axum 0.8, axum-server (rustls, `ring` provider), rustls-acme, rcgen, sqlx 0.8
@@ -26,17 +27,22 @@ governor, tracing (+ JSON), metrics + Prometheus exporter. `unsafe` is forbidden
 
 ## Request path
 
-`copper_cloud_core::app(state, copper_cloud_canvas::router())` builds:
+`copper_cloud::build_app` = `copper_cloud_core::app_with(state, canvas::router(), root)`:
 
 ```
 Router
-├── GET /healthz                      (only route without the instance key)
-├── /v1  = core::router() ⊕ canvas::router()
-└── fallback → 404 JSON
+├── GET /healthz                      (not gated)
+├── /v1  = core::router() ⊕ canvas::router()     (fallback → 404 JSON)
+│         POST /v1/auth/pair is the only /v1 route without the gate header
+├── /admin/api = admin_api::router()   (cookie sessions + CSRF header; fallback → 404 JSON)
+└── fallback → portal::serve           (embedded portal/out; /v1x, /metrics… → 404 JSON)
 layers (outermost first):
   observe::track      span {method, path, route, ip, user_id, status, latency_ms}; http_* metrics
-  instance_gate       X-Copper-Instance, SHA-256 + constant-time compare → 401 instance_key
-  auth_rate_limit     /v1/auth/* except GET /me: GCRA keyed by client IP (IPv6 /64)
+  instance_gate       /v1 only: X-Copper-Instance = instance key (open mode, constant-time)
+                      or access key (SHA-256 lookup) → GateIdentity extension; else 401
+                      instance_key. access_mode cached 5 s.
+  auth_rate_limit     /v1/auth/* except GET /me + pairing management; /admin/api/login has
+                      its own bucket. GCRA keyed by client IP (IPv6 /64)
 ```
 
 Handlers authenticate with the `AuthUser` extractor (shared with the canvas crate): one SQL
@@ -57,7 +63,12 @@ it. The query string is never logged (it can carry `?token=`).
 | `sessions` | `id`; `token_sha256` unique | FK → devices (cascade), sliding `expires_at` |
 | `sync_docs` | `(user_id, domain)` | `version` (LWW), `device_id` (last writer), `payload` sealed, `payload_bytes` |
 | `history` | `seq` bigserial; index `(user_id, seq)` | `device_id`, `visited_at`, `payload` sealed |
-| `server_settings` | `key` | runtime overrides from the admin CLI (`allow_signup`) |
+| `server_settings` | `key` | runtime settings from the admin CLI / portal (`allow_signup`, `access_mode`) |
+| `access_keys` | `id`; `key_sha256` unique | per-person gate credentials: `label`, `email?`, `expires_at?`, `revoked_at?`, `uses`/`max_uses?`, `last_used_at` |
+| `pairing_codes` | `id`; `code_sha256` unique | single-use, 10-min codes: `user_id`, `device_name?`, `used_at`, `used_by_device` |
+| `admins` | `id`; `lower(email)` unique | portal admin accounts (Argon2id), `last_login_at` |
+| `admin_sessions` | `id`; `token_sha256` unique | `cc_admin` cookie sessions, fixed 7-day `expires_at` |
+| `admin_audit` | `id` bigserial | every admin mutation: `admin_id`, `action`, `target`, `detail` jsonb, `at` |
 
 Canvas tables (`0100+` migrations) are owned by the canvas crate. All migrations live in
 `crates/copper-cloud/migrations` and are embedded once as `copper_cloud_core::db::MIGRATOR`;

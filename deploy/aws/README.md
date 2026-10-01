@@ -6,7 +6,8 @@ deployment is fully separate because every resource name includes `<name>`, so y
 many in parallel as you like.
 
 ```bash
-./deploy/aws/up.sh demo          # create or update; waits for the install, then prints the link code
+./deploy/aws/up.sh demo          # create or update; waits for the install, then prints the admin
+                                 # portal URL + password command and the first link code
 ./deploy/aws/link-code.sh demo   # print the link code again
 ./deploy/aws/down.sh demo        # destroy everything
 ```
@@ -33,7 +34,8 @@ Terraform deploys into whichever AWS account your credentials (`AWS_PROFILE`) re
                [--domain cloud.example.com --email ops@example.com]
                [--instance-type t3.small] [--region us-east-1]
                [--db-instance-class db.t4g.micro] [--ssh-cidr 1.2.3.4/32 [--key-name kp]]
-               [--no-signup | --signup]
+               [--no-signup | --signup] [--no-eip | --eip]
+               [--admin-email admin@example.com] [--access-mode directory|open]
 ```
 
 - `name`: 2–24 characters: lowercase letters, digits and single hyphens.
@@ -47,7 +49,36 @@ Terraform deploys into whichever AWS account your credentials (`AWS_PROFILE`) re
   and the rest stay as they were, so `./up.sh demo --domain …` changes only the domain.
 - Once `terraform apply` finishes, `up.sh` checks `/copper-cloud/<name>/status` until it reads
   `ready`. The timeout is 15 minutes; change it with `COPPER_CLOUD_UP_TIMEOUT=<seconds>`. Then
-  it prints the link code. A `failed: <step>` status stops the script with an error.
+  it prints the admin portal URL, the admin email, the command that prints the admin password,
+  and the link code. A `failed: <step>` status stops the script with an error.
+- `--admin-email` (default `admin@<domain or public IP>`) and `--access-mode` (default
+  `directory`) only matter on the first boot of a fresh database; see [Admin portal](#admin-portal).
+
+## Admin portal
+
+Every deployment gets a web admin portal served by the same binary at the instance URL:
+
+```bash
+terraform -chdir=deploy/aws output -state=state/demo/terraform.tfstate -raw admin_url
+# → https://203.0.113.9/
+eval "$(terraform -chdir=deploy/aws output -state=state/demo/terraform.tfstate -raw admin_password_command)"
+# → the initial admin password (SSM SecureString /copper-cloud/demo/admin-password)
+```
+
+(`up.sh` prints all three: `admin_url`, `admin_email`, `admin_password_command`.) Without a
+domain the certificate is self-signed, so the browser warns once — compare the fingerprint with
+the `fp=` in the link code if you want to be sure.
+
+- Terraform generates the password (`random_password.admin`) and stores it in SSM; cloud-init
+  reads it like the other secrets and `install.sh` creates the admin **only if it does not
+  exist**. Changing the password in the portal (Settings) does not update SSM, and replacing
+  the VM never resets it. Lost it? `sudo copper-cloud admin reset-admin-password --email …` in
+  an SSM session.
+- A fresh deployment starts in **directory** mode: only personal access keys minted in the
+  portal (Access keys › New key) pass the instance gate, and each comes with its own link
+  code. The link code `up.sh` prints is one such key (label "Installer link code", one account)
+  for your first Copper. Switch to **open** mode (the shared instance link code works for
+  everyone) in the portal › Settings, or deploy with `--access-mode open`.
 
 ## Layout and state
 
@@ -113,10 +144,11 @@ quotas: 5 EIPs per region by default, and 40 RDS instances.
   | `database-url` | SecureString | the RDS connection URL |
   | `instance-key` | SecureString | 32 random bytes, base64url |
   | `master-key` | SecureString | 32 random bytes, base64url |
+  | `admin-password` | SecureString | initial admin portal password (24 alphanumerics) |
   | `link-code` | SecureString | written by the VM |
   | `status` | String | `pending` → `installing` → `ready` \| `failed: <step>` |
 
-  Terraform owns all five parameters, so `down.sh` removes them too.
+  Terraform owns all six parameters, so `down.sh` removes them too.
 
 ### Boot sequence (`user_data.sh.tftpl`)
 
@@ -130,6 +162,8 @@ quotas: 5 EIPs per region by default, and 40 RDS instances.
    - `COPPER_CLOUD_BINARY`
    - `COPPER_CLOUD_INSTANCE_KEY`
    - `COPPER_CLOUD_MASTER_KEY`
+   - `COPPER_CLOUD_ADMIN_PASSWORD` (and `COPPER_CLOUD_ADMIN_EMAIL` when `admin_email` is set)
+   - `COPPER_CLOUD_ACCESS_MODE`: `directory` or `open` (fresh database only)
    - `COPPER_CLOUD_PUBLIC_HOST`: the domain, or the EIP if there's no domain
    - `COPPER_CLOUD_ALLOW_SIGNUP`
    - `COPPER_CLOUD_DOMAIN` and `COPPER_CLOUD_ACME_EMAIL`, only when a domain is set

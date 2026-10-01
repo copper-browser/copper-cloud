@@ -5,7 +5,9 @@
 copper-cloud is a small self-hosted service on the public internet holding users' browsing
 data. Goals:
 
-1. Strangers on the internet cannot use the API at all (instance key), nor read traffic (TLS).
+1. Strangers on the internet cannot use the API at all (gate credential: instance key or a
+   personal access key), nor read traffic (TLS). In `directory` mode the admin decides, per
+   person, who may connect.
 2. Users of the same instance cannot see each other's data (every query is user-scoped).
 3. A stolen database dump / disk snapshot without the master key reveals no synced content.
 4. No secrets in logs.
@@ -15,15 +17,73 @@ compromised server process or host, key rotation, multi-instance HA.
 
 ## Layers
 
-### Instance key
+### Gate: instance key or access key
 
-Every request except `GET /healthz` must carry `X-Copper-Instance: <instance_key>`. Both the
-presented and configured keys are SHA-256'd and compared in constant time, so neither content
-nor length leaks. Without it the server answers `401 {"error":"instance_key"}` for every path —
-unknown routes included — and never reads request bodies.
+Every `/v1` request except `POST /v1/auth/pair` must carry `X-Copper-Instance`. Without an
+accepted credential the server answers `401 {"error":"instance_key"}` for every `/v1` path —
+unknown routes included — and never reads request bodies. Two kinds of credential:
 
-The key is ≥ 32 characters of `[A-Za-z0-9-_.~]` (generated: base64url of 32 random bytes). It
-travels inside the link code's URL fragment.
+- **Instance key** — one shared secret per instance, ≥ 32 characters of `[A-Za-z0-9-_.~]`
+  (generated: base64url of 32 random bytes), travelling inside the link code's URL fragment.
+  The presented and configured keys are SHA-256'd and compared in constant time, so neither
+  content nor length leaks. **Accepted only while `access_mode = open`.**
+- **Access key** — per person, minted by an admin in the portal (or by pairing, below):
+  `ck_` + 32 random bytes base64url. Only SHA-256(key) is stored (`access_keys.key_sha256`,
+  unique index); the plaintext is shown once. Accepted in both modes while not revoked and not
+  expired; revocation is immediate (keys are looked up per request, not cached). Optional
+  `email` binding (signup must use that email) and `max_uses` (accounts that may be created
+  with it). `last_used_at` is written at most once a minute.
+
+`access_mode` (`server_settings`) is `open` or `directory`. Fresh installs (install.sh /
+Terraform) start in `directory`, so a leaked link code of one person can be revoked without
+re-keying everyone; instances that predate access keys stay `open`. The mode is cached in
+memory for 5 seconds (one query per 5 s) — a mode switch takes effect within that window
+(immediately on the server that handled the admin's change). If the database cannot be read
+and nothing is cached the gate fails closed (500).
+
+Which credential a request used is attached as a `GateIdentity` request extension; signup uses
+it (access key → permitted, email binding enforced, one use consumed atomically in the signup
+transaction; instance key → `allow_signup`; directory mode without a key → `403`).
+
+### Pairing codes
+
+A signed-in Copper can mint a single-use code (`cp_` + 24 random bytes base64url, SHA-256
+stored, 10-minute TTL, ≤ 20 active per user) that signs another Copper into the same account.
+`POST /v1/auth/pair` is the only gate-free `/v1` route: the code is the credential. It is rate
+limited with `/v1/auth/*`, looked up by hash (an indexed equality on a 256-bit digest — no
+timing oracle on the code), and consumed with `UPDATE … WHERE used_at IS NULL AND expires_at >
+now() RETURNING` inside the transaction that creates the session, so two concurrent redemptions
+cannot both succeed. The response carries the gate credential the new device must use: the
+instance key in `open` mode, or — in `directory` mode — a fresh access key bound to the user's
+email (label `"<device> via pairing"`), so every paired device is individually revocable.
+Codes are revocable by their owner and by admins; used/expired rows are purged after a day.
+
+### Admin accounts and the admin API
+
+Admins (`admins`) are separate from users: they manage the instance from the web portal and
+`/admin/api/*`; they have no synced data. The admin API is not behind the instance gate.
+
+- Passwords: Argon2id like user passwords; login failures are constant-work and identical for
+  unknown email vs wrong password. Login is rate limited per IP (own bucket,
+  `limits.auth_per_minute`).
+- Sessions: cookie `cc_admin` = 32 random bytes base64url, SHA-256 stored, fixed 7-day
+  lifetime, `HttpOnly; SameSite=Strict; Path=/admin` and `Secure` (omitted only with
+  `tls.mode = "off"`). Changing the password revokes the admin's other sessions;
+  `admin reset-admin-password` revokes all.
+- CSRF: `SameSite=Strict` plus a required `X-Requested-With: copper-cloud-portal` header on
+  every non-GET request (a cross-site form or `fetch` cannot add it without a CORS preflight,
+  which the server never grants). Missing → `403 {"error":"csrf"}`.
+- Every admin mutation (including login/logout) is written to `admin_audit` (admin, action,
+  target id, non-secret detail, time).
+- Admin responses are `Cache-Control: no-store`. Access-key plaintext appears only in the
+  `POST access-keys` response; lists never contain secrets. Canvas content is never exposed.
+- The portal's static files are served with a strict CSP (`default-src 'self'`,
+  `script-src 'self'` + SHA-256 hashes of the export's own inline bootstrap scripts, computed
+  per file at serve time; `connect-src 'self'`; `frame-ancestors 'none'`), `nosniff`,
+  `Referrer-Policy: same-origin` and `X-Frame-Options: DENY`.
+- Initial credentials: install.sh generates a 24-character password (printed once, saved to
+  `/etc/copper-cloud/admin-credentials`, `0600 root`); Terraform generates it into SSM
+  SecureString `/copper-cloud/<name>/admin-password`. Change it after first login.
 
 ### TLS
 
@@ -48,14 +108,18 @@ rustls only (ring provider), TLS 1.2+ with rustls' safe defaults; HTTP/2 or HTTP
   Argon2 work (a dummy hash is verified when the user does not exist).
 - Session tokens: 32 bytes from the OS CSPRNG, base64url. The database stores only
   SHA-256(token), so a DB leak does not yield usable sessions. Sliding 90-day expiry; expired
-  rows are purged hourly. Password change revokes all other sessions; `admin reset-password`
-  and `admin disable-user` revoke all.
+  rows are purged hourly. Password change revokes all other sessions; `admin reset-password`,
+  `admin disable-user` and the portal's disable / reset-password revoke all (disable also
+  disconnects the user's live canvas peers).
 - Rate limiting: `limits.auth_per_minute` (10) per client IP on `/v1/auth/*` (signup, login,
-  logout, password; `GET /v1/auth/me` is exempt because a 256-bit bearer token cannot be
-  brute-forced and clients use it as a status probe). IPv6 clients are keyed by /64.
+  logout, password, pair; `GET /v1/auth/me` and pairing-code management are exempt because a
+  256-bit bearer token cannot be brute-forced and clients use them as status probes). IPv6
+  clients are keyed by /64. Admin login has a separate bucket of the same size.
   `X-Forwarded-For` is honored only with `trust_proxy = true`.
-- Signup: open by default; `allow_signup = false` (or `admin disable-signup`) restricts it to
-  the very first user, after which the admin CLI creates accounts.
+- Signup: with the instance key (open mode) it follows `allow_signup` (`admin
+  disable-signup` / the portal restricts it to the very first user, after which the admin
+  creates accounts); with an access key it is permitted (subject to the key's email binding
+  and `max_uses`).
 
 ### Authorization
 
@@ -88,13 +152,16 @@ There is no online rotation. Manual procedure if the master key must change: sto
 service, run a one-off job that unwraps every `data_key_wrapped`/`doc_key_wrapped` with the old
 KEK and re-wraps with the new (data blobs themselves need no re-encryption), swap the key in the
 config, start. Rotating a user's data key would require re-encrypting their rows. Instance-key
-rotation is just a config change + new link codes for every Copper.
+rotation is just a config change + new link codes for every Copper still on the instance key
+(Coppers on access keys are unaffected); a single person's access key is rotated by revoking
+it and minting a new one in the portal.
 
 ### Logging
 
 Request spans record method, path (never the query string), matched route, client IP,
-`user_id`, status and latency. Never logged: tokens, passwords, instance/master keys, request
-or response bodies, payloads. `Config`'s `Debug` redacts keys and the database password.
+`user_id`, status and latency. Never logged: tokens, passwords, instance/master keys, access
+keys, pairing codes, admin cookies, request or response bodies, payloads (access keys and
+pairing codes are logged by id only). `Config`'s `Debug` redacts keys and the database password.
 500s log the internal error chain server-side only; clients get `{"error":"internal"}`.
 
 ### Process hardening (systemd unit)
@@ -104,7 +171,8 @@ Dedicated `copper-cloud` user; `CAP_NET_BIND_SERVICE` only; `NoNewPrivileges`,
 `ProtectHome`, `PrivateTmp`, `PrivateDevices`, kernel/cgroup/clock protection,
 `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`, `MemoryDenyWriteExecute`,
 `SystemCallFilter=@system-service ~@privileged`, `UMask=0077`. Config file `0600`
-(`copper-cloud`), TLS key `0640 root:copper-cloud`, link-code file `0600 root`.
+(`copper-cloud`), TLS key `0640 root:copper-cloud`, link-code and admin-credentials files
+`0600 root`.
 
 ### Database
 

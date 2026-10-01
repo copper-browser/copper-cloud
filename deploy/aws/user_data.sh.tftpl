@@ -1,7 +1,7 @@
 #!/bin/bash
 # copper-cloud cloud-init bootstrap (rendered by Terraform; deployment "${name}").
 #
-# Secrets (DATABASE_URL, instance key, master key) are NOT in this user data:
+# Secrets (DATABASE_URL, instance key, master key, admin password) are NOT in this user data:
 # they are fetched from SSM SecureString with the instance role, with xtrace
 # off, so they never land in user data, the console log or the install log.
 #
@@ -131,7 +131,8 @@ set +x
 DATABASE_URL=$(retry 5 5 get_secret database-url)
 COPPER_CLOUD_INSTANCE_KEY=$(retry 5 5 get_secret instance-key)
 COPPER_CLOUD_MASTER_KEY=$(retry 5 5 get_secret master-key)
-export DATABASE_URL COPPER_CLOUD_INSTANCE_KEY COPPER_CLOUD_MASTER_KEY
+COPPER_CLOUD_ADMIN_PASSWORD=$(retry 5 5 get_secret admin-password)
+export DATABASE_URL COPPER_CLOUD_INSTANCE_KEY COPPER_CLOUD_MASTER_KEY COPPER_CLOUD_ADMIN_PASSWORD
 set -x
 
 export COPPER_CLOUD_BINARY="$BINARY"
@@ -142,6 +143,11 @@ export COPPER_CLOUD_PUBLIC_HOST="${public_host}"
 export COPPER_CLOUD_PUBLIC_HOST="$(imds public-ipv4)"
 %{ endif ~}
 export COPPER_CLOUD_ALLOW_SIGNUP="${allow_signup}"
+# Admin portal account (created only if missing) and the access mode of a fresh instance.
+%{ if admin_email != "" ~}
+export COPPER_CLOUD_ADMIN_EMAIL="${admin_email}"
+%{ endif ~}
+export COPPER_CLOUD_ACCESS_MODE="${access_mode}"
 %{ if domain != "" ~}
 export COPPER_CLOUD_DOMAIN="${domain}"
 export COPPER_CLOUD_ACME_EMAIL="${acme_email}"
@@ -161,7 +167,7 @@ LINK_CODE=$(grep -m1 -o 'copper-cloud://[^[:space:]]*' /etc/copper-cloud/link-co
 test -n "$LINK_CODE"
 aws ssm put-parameter --name "$SSM_PREFIX/link-code" --type SecureString --overwrite \
   --value "$LINK_CODE" >/dev/null
-unset LINK_CODE DATABASE_URL COPPER_CLOUD_INSTANCE_KEY COPPER_CLOUD_MASTER_KEY
+unset LINK_CODE DATABASE_URL COPPER_CLOUD_INSTANCE_KEY COPPER_CLOUD_MASTER_KEY COPPER_CLOUD_ADMIN_PASSWORD
 set -x
 
 STEP=doctor

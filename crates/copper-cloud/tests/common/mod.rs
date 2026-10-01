@@ -172,3 +172,106 @@ pub fn new_device() -> String {
 }
 
 pub const PASSWORD: &str = "correct horse battery staple";
+
+// ---------------------------------------------------------------------------------------------
+// Access keys, access mode, admin API
+
+pub const ADMIN_EMAIL: &str = "admin@example.com";
+pub const ADMIN_PASSWORD: &str = "admin password 0123";
+
+impl TestServer {
+    /// Request with an explicit gate credential (`X-Copper-Instance`).
+    pub fn gated(&self, method: reqwest::Method, path: &str, key: &str) -> reqwest::RequestBuilder {
+        self.http
+            .request(method, self.url(path))
+            .header("X-Copper-Instance", key)
+    }
+
+    /// Set `access_mode` in the database and drop this server's 5 s cache (test hook).
+    pub async fn set_access_mode(&self, mode: copper_cloud_core::access::AccessMode) {
+        copper_cloud_core::access::set_access_mode(&self.state.db, mode)
+            .await
+            .unwrap();
+        self.state.access_mode.clear();
+    }
+
+    /// Mint an access key straight in the database; returns `(id, key)`.
+    pub async fn mint_key(
+        &self,
+        label: &str,
+        email: Option<&str>,
+        max_uses: Option<i32>,
+    ) -> (uuid::Uuid, String) {
+        let mut conn = self.state.db.acquire().await.unwrap();
+        copper_cloud_core::access::mint_access_key(
+            &mut conn,
+            &copper_cloud_core::access::NewAccessKey {
+                label,
+                email,
+                max_uses,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// `POST /v1/auth/signup` with gate credential `key`.
+    pub async fn signup_with(&self, key: &str, email: &str, device: &str) -> reqwest::Response {
+        self.gated(reqwest::Method::POST, "/v1/auth/signup", key)
+            .json(&json!({
+                "email": email,
+                "password": PASSWORD,
+                "device": { "id": device, "name": "Test Mac" },
+            }))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    pub async fn create_admin(&self) {
+        copper_cloud::admin_api::create_admin(&self.state.db, ADMIN_EMAIL, ADMIN_PASSWORD.into())
+            .await
+            .unwrap();
+    }
+
+    /// Admin API request with the CSRF header and (optionally) the session cookie.
+    pub fn admin(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        cookie: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let mut rb = self
+            .http
+            .request(method, self.url(&format!("/admin/api/{path}")))
+            .header("X-Requested-With", "copper-cloud-portal");
+        if let Some(c) = cookie {
+            rb = rb.header("Cookie", c);
+        }
+        rb
+    }
+
+    /// Log in as [`ADMIN_EMAIL`]; returns the `Cookie` header value (`cc_admin=…`).
+    pub async fn admin_login(&self) -> String {
+        let r = self
+            .admin(reqwest::Method::POST, "login", None)
+            .json(&json!({ "email": ADMIN_EMAIL, "password": ADMIN_PASSWORD }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "admin login");
+        cookie_from(&r)
+    }
+}
+
+/// `cc_admin=<token>` from a response's `Set-Cookie`.
+pub fn cookie_from(r: &reqwest::Response) -> String {
+    let set = r
+        .headers()
+        .get("set-cookie")
+        .expect("set-cookie")
+        .to_str()
+        .unwrap();
+    set.split(';').next().unwrap().trim().to_owned()
+}

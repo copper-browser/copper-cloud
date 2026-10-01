@@ -17,6 +17,12 @@ pub enum ApiError {
     /// 403
     #[error("forbidden")]
     Forbidden,
+    /// 403 with a specific machine-readable code (e.g. `"access_key_email"`, `"csrf"`).
+    #[error("forbidden: {code}")]
+    Denied {
+        code: &'static str,
+        message: &'static str,
+    },
     /// 404
     #[error("not found")]
     NotFound,
@@ -47,7 +53,7 @@ impl ApiError {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::Forbidden | Self::Denied { .. } => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -60,7 +66,7 @@ impl ApiError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::BadRequest(_) => "bad_request",
-            Self::Unauthorized(code) => code,
+            Self::Unauthorized(code) | Self::Denied { code, .. } => code,
             Self::Forbidden => "forbidden",
             Self::NotFound => "not_found",
             Self::Conflict(_) => "conflict",
@@ -79,6 +85,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(msg) => json!({ "error": code, "message": msg }),
             Self::Unauthorized(_) => json!({ "error": code, "message": "unauthorized" }),
             Self::Forbidden => json!({ "error": code, "message": "forbidden" }),
+            Self::Denied { message, .. } => json!({ "error": code, "message": message }),
             Self::NotFound => json!({ "error": code, "message": "not found" }),
             Self::Conflict(Value::Object(mut map)) => {
                 map.insert("error".into(), Value::from(code));

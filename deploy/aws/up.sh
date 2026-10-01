@@ -6,6 +6,7 @@
 #                  [--instance-type t3.small] [--region us-east-1]
 #                  [--db-instance-class db.t4g.micro] [--ssh-cidr 1.2.3.4/32 [--key-name kp]]
 #                  [--no-signup | --signup] [--no-eip | --eip]
+#                  [--admin-email admin@example.com] [--access-mode directory|open]
 #
 # Idempotent: re-running reuses the settings saved in state/<name>/terraform.tfvars
 # unless overridden by flags. State lives in state/<name>/terraform.tfstate.
@@ -14,7 +15,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 usage() {
-  sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -37,6 +38,8 @@ SSH_CIDR="$(tfvar_get "$TFVARS" allow_ssh_cidr)"
 KEY_NAME="$(tfvar_get "$TFVARS" ssh_key_name)"
 SIGNUP="$(tfvar_get "$TFVARS" allow_signup)"
 USE_EIP="$(tfvar_get "$TFVARS" use_eip)"
+ADMIN_EMAIL="$(tfvar_get "$TFVARS" admin_email)"
+ACCESS_MODE="$(tfvar_get "$TFVARS" access_mode)"
 BINARY_FLAG=""
 
 while [ $# -gt 0 ]; do
@@ -54,6 +57,8 @@ while [ $# -gt 0 ]; do
     --signup) SIGNUP=true; shift ;;
     --no-eip) USE_EIP=false; shift ;;
     --eip) USE_EIP=true; shift ;;
+    --admin-email) ADMIN_EMAIL=${2?--admin-email needs a value}; shift 2 ;;
+    --access-mode) ACCESS_MODE=${2:?--access-mode needs directory or open}; shift 2 ;;
     -h | --help) usage 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
@@ -64,6 +69,8 @@ INSTANCE_TYPE=${INSTANCE_TYPE:-$DEFAULT_INSTANCE_TYPE}
 REGION=${REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-$DEFAULT_REGION}}}
 DB_CLASS=${DB_CLASS:-db.t4g.micro}
 SIGNUP=${SIGNUP:-true}
+ACCESS_MODE=${ACCESS_MODE:-directory}
+case "$ACCESS_MODE" in directory | open) ;; *) die "--access-mode must be directory or open" ;; esac
 if [ -n "$DOMAIN" ] && [ -z "$EMAIL" ]; then
   die "--domain needs --email (ACME contact)"
 fi
@@ -126,6 +133,8 @@ tfstr() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
   echo "ssh_key_name      = $(tfstr "$KEY_NAME")"
   echo "allow_signup      = $SIGNUP"
   echo "use_eip           = ${USE_EIP:-true}"
+  echo "admin_email       = $(tfstr "$ADMIN_EMAIL")"
+  echo "access_mode       = $(tfstr "$ACCESS_MODE")"
 } >"$TFVARS.tmp"
 mv "$TFVARS.tmp" "$TFVARS"
 
@@ -168,5 +177,12 @@ fi
 
 echo
 echo "copper-cloud '$NAME' is ready: $URL"
-echo "Link code (paste into Copper › Settings › Cloud):"
+echo
+echo "Admin portal: $(tf_output admin_url)"
+echo "  email:    $(tf_output admin_email)"
+echo "  password: $(tf_output admin_password_command)"
+echo "  (initial password; changing it in the portal does not update SSM)"
+echo
+echo "Link code (paste into Copper › Settings › Cloud; in directory mode it creates one"
+echo "account — mint a personal access key per person in the portal):"
 ssm_param "$REGION" "$PREFIX/link-code" --with-decryption

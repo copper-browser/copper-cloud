@@ -16,3 +16,11 @@ binary_path = "/abs/path/to/deploy/aws/bin/v0.1.0/copper-cloud-0.1.0-linux-x86_6
 # ssh_key_name   = "my-keypair"
 
 allow_signup = true
+
+# Admin portal account created on first boot (password: random, in SSM — see the
+# admin_password_command output). Empty = admin@<domain or public IP>.
+# admin_email = "ops@example.com"
+
+# "directory" (default): only personal access keys minted in the portal pass the gate.
+# "open": the shared instance link code works for everyone. Applies to a fresh instance only.
+# access_mode = "directory"

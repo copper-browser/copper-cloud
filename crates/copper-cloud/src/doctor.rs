@@ -173,6 +173,36 @@ async fn check_database(r: &mut Report, cfg: &Config) {
             ),
         );
     }
+    let access: Result<(i64, i64), _> = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM admins),
+                (SELECT count(*) FROM access_keys
+                 WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now()))",
+    )
+    .fetch_one(&pool)
+    .await;
+    if let (Ok((admins, keys)), Ok(mode)) = (
+        access,
+        copper_cloud_core::access::load_access_mode(&pool).await,
+    ) {
+        let level = if admins == 0 { Level::Warn } else { Level::Ok };
+        r.line(
+            level,
+            "access",
+            format!(
+                "mode {mode}, {keys} valid access keys, {admins} portal admins{}{}",
+                if admins == 0 {
+                    " — create one: copper-cloud admin create-admin --email …"
+                } else {
+                    ""
+                },
+                if crate::portal::portal_built() {
+                    ""
+                } else {
+                    " (portal not built into this binary)"
+                }
+            ),
+        );
+    }
     pool.close().await;
 }
 

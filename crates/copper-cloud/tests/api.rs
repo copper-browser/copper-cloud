@@ -23,17 +23,13 @@ fn unb64(v: &Value) -> String {
 #[tokio::test]
 async fn instance_gate() {
     let s = start().await;
-    // healthz is the only open endpoint.
+    // healthz is open; everything under /v1 (except /v1/auth/pair) is gated. Paths outside
+    // /v1 belong to the admin API / portal (see tests/portal.rs, tests/admin.rs).
     let r = s.http.get(s.url("/healthz")).send().await.unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(r.text().await.unwrap(), "ok");
 
-    for path in [
-        "/v1/auth/me",
-        "/v1/info",
-        "/v1/does-not-exist",
-        "/elsewhere",
-    ] {
+    for path in ["/v1/auth/me", "/v1/info", "/v1/does-not-exist", "/v1"] {
         let r = s.http.get(s.url(path)).send().await.unwrap();
         assert_eq!(r.status(), 401, "{path}");
         let body: Value = r.json().await.unwrap();

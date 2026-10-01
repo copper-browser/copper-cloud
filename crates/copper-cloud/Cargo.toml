@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 default-run = "copper-cloud"
+build = "build.rs"
 
 [lib]
 name = "copper_cloud"
@@ -25,7 +26,10 @@ anyhow.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 clap.workspace = true
+hex.workspace = true
+rust-embed.workspace = true
 rustls.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 time.workspace = true

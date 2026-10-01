@@ -1,0 +1,176 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* Light/dark follows the OS (prefers-color-scheme). No toggle, no inline theme script. */
+@custom-variant dark (@media (prefers-color-scheme: dark));
+
+@theme {
+  /* UI type: 13px body, 14px base, system stack. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui,
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.375rem;
+
+  /* Rail collapses to icons below 900px. */
+  --breakpoint-rail: 56.25rem;
+}
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-rail: var(--rail);
+  --color-rail-active: var(--rail-active);
+  --color-well: var(--well);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-warning-surface: var(--warning-surface);
+  --color-warning-foreground: var(--warning-foreground);
+  --radius-sm: calc(var(--radius) * 0.5);
+  --radius-md: calc(var(--radius) * 0.75);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.25);
+  --radius-2xl: calc(var(--radius) * 1.5);
+  --radius-3xl: calc(var(--radius) * 2);
+  --radius-4xl: calc(var(--radius) * 2.5);
+}
+
+/*
+ * Palette: warm-neutral grays (hue 75, near-zero chroma) + one copper accent.
+ * Copper is reserved for the primary action, focus, checked controls and the
+ * active nav icon.
+ */
+:root {
+  color-scheme: light;
+  --radius: 0.5rem;
+
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.22 0.004 75);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.22 0.004 75);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.22 0.004 75);
+
+  --primary: #a3612b;
+  --primary-hover: #8e5424;
+  --primary-foreground: oklch(0.99 0.004 75);
+
+  --secondary: oklch(0.962 0.002 75);
+  --secondary-foreground: oklch(0.24 0.004 75);
+  --muted: oklch(0.962 0.002 75);
+  --muted-foreground: oklch(0.5 0.006 75);
+  --faint: oklch(0.62 0.005 75);
+  --accent: oklch(0.955 0.002 75);
+  --accent-foreground: oklch(0.2 0.004 75);
+  --destructive: oklch(0.55 0.2 27);
+
+  --border: oklch(0.918 0.003 75);
+  --input: oklch(0.88 0.004 75);
+  --ring: color-mix(in oklch, #b87333 70%, transparent);
+
+  --rail: oklch(0.982 0.002 75);
+  --rail-active: oklch(0.935 0.003 75);
+  --well: oklch(0.972 0.002 75);
+
+  --success: oklch(0.62 0.15 152);
+  --warning: oklch(0.72 0.15 70);
+  --warning-surface: oklch(0.97 0.03 80);
+  --warning-foreground: oklch(0.42 0.09 60);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --background: oklch(0.175 0.003 75);
+    --foreground: oklch(0.93 0.003 75);
+    --card: oklch(0.2 0.003 75);
+    --card-foreground: oklch(0.93 0.003 75);
+    --popover: oklch(0.215 0.003 75);
+    --popover-foreground: oklch(0.93 0.003 75);
+
+    --primary: #c98a52;
+    --primary-hover: #d69a63;
+    --primary-foreground: oklch(0.18 0.02 60);
+
+    --secondary: oklch(0.24 0.003 75);
+    --secondary-foreground: oklch(0.93 0.003 75);
+    --muted: oklch(0.235 0.003 75);
+    --muted-foreground: oklch(0.69 0.005 75);
+    --faint: oklch(0.56 0.005 75);
+    --accent: oklch(0.255 0.003 75);
+    --accent-foreground: oklch(0.95 0.003 75);
+    --destructive: oklch(0.68 0.18 25);
+
+    --border: oklch(1 0 0 / 8%);
+    --input: oklch(1 0 0 / 13%);
+    --ring: color-mix(in oklch, #c98a52 70%, transparent);
+
+    --rail: oklch(0.155 0.003 75);
+    --rail-active: oklch(0.235 0.003 75);
+    --well: oklch(0.205 0.003 75);
+
+    --success: oklch(0.72 0.15 152);
+    --warning: oklch(0.78 0.14 75);
+    --warning-surface: oklch(0.26 0.04 70);
+    --warning-foreground: oklch(0.86 0.09 80);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans antialiased;
+    font-size: 16px;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-background text-sm text-foreground;
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection {
+    background: color-mix(in oklch, var(--primary) 28%, transparent);
+  }
+  kbd {
+    @apply font-sans;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

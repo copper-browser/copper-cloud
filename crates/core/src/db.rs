@@ -87,3 +87,20 @@ pub async fn purge_expired_sessions(pool: &PgPool) -> Result<u64, sqlx::Error> {
         .await?
         .rows_affected())
 }
+
+/// Delete expired admin sessions and pairing codes that expired (or were used) more than a
+/// day ago; returns rows removed.
+pub async fn purge_expired_credentials(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let admins = sqlx::query("DELETE FROM admin_sessions WHERE expires_at < now()")
+        .execute(pool)
+        .await?
+        .rows_affected();
+    let codes = sqlx::query(
+        "DELETE FROM pairing_codes
+         WHERE expires_at < now() - interval '1 day' OR used_at < now() - interval '1 day'",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(admins + codes)
+}

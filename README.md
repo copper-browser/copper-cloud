@@ -21,17 +21,31 @@ tar xzf copper-cloud-0.1.0-linux-x86_64.tar.gz && sudo ./install.sh
 
 The installer sets up Postgres (unless you pass `DATABASE_URL`), a `copper-cloud` system user,
 `/etc/copper-cloud/copper-cloud.toml` with fresh keys, a self-signed certificate (or Let's
-Encrypt with `COPPER_CLOUD_DOMAIN=…`), a hardened systemd unit, and prints the **link code**:
+Encrypt with `COPPER_CLOUD_DOMAIN=…`), a hardened systemd unit and a **portal admin account**,
+then prints:
 
 ```
-copper-cloud://203.0.113.10:443/#k=<instance key>&fp=<certificate sha256>
+Admin portal: https://203.0.113.10/
+  email:    admin@203.0.113.10
+  password: <24 chars>   (shown once; also in /etc/copper-cloud/admin-credentials)
+
+Access mode: directory
+  Link code for your first Copper (Settings › Cloud › Connect; creates one account):
+
+  copper-cloud://203.0.113.10:443/#k=ck_<access key>&fp=<certificate sha256>
 ```
 
-Paste it into **Copper › Settings › Cloud › Connect**, then create an account. Re-running the
-installer upgrades in place and keeps keys, certificate and data. Details:
-[docs/install.md](docs/install.md).
+Paste the link code into **Copper › Settings › Cloud › Connect** and create your account. To
+let other people in, sign in to the **admin portal** and mint each person an access key
+(Access keys › New key) — each comes with its own link code, revocable any time. A signed-in
+Copper can also pair another Mac with a single-use pairing code. Choose the admin with
+`COPPER_CLOUD_ADMIN_EMAIL` / `COPPER_CLOUD_ADMIN_PASSWORD`, or start in `open` mode (one shared
+link code for everyone) with `COPPER_CLOUD_ACCESS_MODE=open`. Re-running the installer upgrades
+in place and keeps keys, certificate, admins and data. Details: [docs/install.md](docs/install.md),
+[docs/operations.md](docs/operations.md#admin-portal).
 
-AWS (EC2 + RDS + Elastic IP, link code in SSM): see [deploy/aws/README.md](deploy/aws/README.md).
+AWS (EC2 + RDS + Elastic IP; link code and admin password in SSM): see
+[deploy/aws/README.md](deploy/aws/README.md).
 
 ## Run locally (development)
 
@@ -46,7 +60,13 @@ cargo run -- --config /tmp/cc.toml link-code     # copper-cloud://localhost:8443
 COPPER_CLOUD_DATABASE_URL=postgres://localhost:5432/copper_cloud_dev \
   cargo run -- --config /tmp/cc.toml doctor
 curl -k https://localhost:8443/healthz           # ok
+printf 'a dev admin password\n' | COPPER_CLOUD_DATABASE_URL=postgres://localhost:5432/copper_cloud_dev \
+  cargo run -- --config /tmp/cc.toml admin create-admin --email admin@example.com --password-stdin
+open https://localhost:8443/                     # admin portal (needs portal/out, see below)
 ```
+
+The admin portal is the Next.js app in `portal/` (`cd portal && bun install && bun run build`
+→ `portal/out`); debug builds serve `portal/out` from disk, release builds embed it.
 
 `init-config` defaults to `listen = 0.0.0.0:8443`, `public_url = localhost:8443`, a
 self-signed certificate in `<config dir>/tls/` (created on first start) and Prometheus metrics
@@ -64,7 +84,9 @@ on `127.0.0.1:9464`. Every config key can be overridden with `COPPER_CLOUD_<KEY>
 | `copper-cloud healthcheck --wait 60` | wait for `/healthz` (pinned TLS) |
 | `copper-cloud tls-init [--force] [--name N]` | create the self-signed certificate |
 | `copper-cloud init-config --write PATH` | write a config with fresh keys |
-| `copper-cloud admin users\|create-user\|reset-password\|delete-user\|disable-user\|enable-user\|disable-signup\|enable-signup` | administration |
+| `copper-cloud admin users\|create-user\|reset-password\|delete-user\|disable-user\|enable-user\|disable-signup\|enable-signup` | user administration |
+| `copper-cloud admin create-admin\|reset-admin-password\|list-admins\|delete-admin` | portal admin accounts |
+| `copper-cloud admin access-mode\|set-access-mode open\|directory\|create-access-key` | who may pass the gate |
 | `copper-cloud version` | version |
 
 All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`, env
@@ -74,8 +96,10 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
 
 - [Architecture](docs/architecture.md) — components, data model, request path
 - [HTTP API](docs/api.md) — every endpoint with requests and responses
+- [Admin API](docs/admin-api.md) — the admin portal's `/admin/api/*` contract
 - [Canvas](docs/canvas.md) — canvases REST + WebSocket rooms
-- [Security](docs/security.md) — threat model, keys, encryption at rest, TLS pinning
+- [Security](docs/security.md) — threat model, access keys, pairing, admin sessions,
+  encryption at rest, TLS pinning
 - [Install](docs/install.md) — VM one-liner, manual install, configuration reference
 - [Operations](docs/operations.md) — doctor, logs, metrics, backups, upgrades
 

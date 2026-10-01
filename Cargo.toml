@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/core", "crates/canvas", "crates/copper-cloud"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/copper-browser/copper-cloud"
@@ -81,6 +81,9 @@ governor = "0.10"
 
 # cli
 clap = { version = "4", features = ["derive", "env"] }
+
+# portal (static export embedded at build time; debug builds read the folder at run time)
+rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess", "include-exclude"] }
 
 # test-only
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }

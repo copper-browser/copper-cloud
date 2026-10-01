@@ -61,7 +61,7 @@ pub enum Command {
     Version,
     /// Write a new config file with freshly generated keys.
     InitConfig(InitConfigArgs),
-    /// User and signup administration.
+    /// User, admin-account, access-mode and signup administration.
     #[command(subcommand)]
     Admin(AdminCommand),
 }
@@ -172,6 +172,51 @@ pub enum AdminCommand {
     DisableSignup,
     /// Turn self-service signup on (overrides allow_signup in the config).
     EnableSignup,
+    /// Create a portal admin account (signs in at https://HOST:PORT/).
+    CreateAdmin {
+        #[arg(long)]
+        email: String,
+        #[command(flatten)]
+        password: PasswordArg,
+        /// Succeed without changes if an admin with this email already exists.
+        #[arg(long)]
+        if_missing: bool,
+    },
+    /// Set a new password for a portal admin and sign out their sessions.
+    ResetAdminPassword {
+        #[arg(long)]
+        email: String,
+        #[command(flatten)]
+        password: PasswordArg,
+    },
+    /// List portal admin accounts.
+    ListAdmins,
+    /// Delete a portal admin account.
+    DeleteAdmin {
+        #[arg(long)]
+        email: String,
+    },
+    /// Who may pass the instance gate: open (shared instance key + access keys) or
+    /// directory (personal access keys only).
+    SetAccessMode {
+        #[arg(value_parser = ["open", "directory"])]
+        mode: String,
+    },
+    /// Print the current access mode.
+    AccessMode,
+    /// Mint a personal access key and print it with its link code (shown once).
+    CreateAccessKey {
+        #[arg(long)]
+        label: String,
+        /// Only this email may sign up with the key.
+        #[arg(long)]
+        email: Option<String>,
+        #[arg(long)]
+        expires_in_days: Option<i32>,
+        /// Number of accounts the key may create.
+        #[arg(long)]
+        max_uses: Option<i32>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -418,5 +463,28 @@ mod tests {
             cli.command,
             Some(Command::Admin(AdminCommand::CreateUser { .. }))
         ));
+        let cli = Cli::try_parse_from([
+            "copper-cloud",
+            "admin",
+            "create-admin",
+            "--email",
+            "admin@example.com",
+            "--password-stdin",
+            "--if-missing",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Admin(AdminCommand::CreateAdmin {
+                if_missing: true,
+                ..
+            }))
+        ));
+        assert!(
+            Cli::try_parse_from(["copper-cloud", "admin", "set-access-mode", "closed"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["copper-cloud", "admin", "set-access-mode", "directory"]).is_ok()
+        );
     }
 }

@@ -6,8 +6,12 @@
 #   sudo ./install.sh
 #
 # Supported: Ubuntu 22.04/24.04, Debian 12, Amazon Linux 2023, Fedora (apt or dnf).
-# Idempotent: re-running keeps the keys, config, certificate and database; it upgrades the
-# binary, re-applies migrations and restarts the service.
+# Idempotent: re-running keeps the keys, config, certificate, database and admin accounts;
+# it upgrades the binary, re-applies migrations and restarts the service.
+#
+# A fresh instance gets a portal admin account (https://HOST[:PORT]/) and access_mode
+# "directory": only personal access keys minted in the portal pass the gate. The link code
+# printed at the end is then a one-account access key for the first Copper.
 #
 # Inputs (environment, all optional):
 #   DATABASE_URL                 use this Postgres instead of installing one locally
@@ -18,6 +22,10 @@
 #   COPPER_CLOUD_ALLOW_SIGNUP    true|false (default true; the first user can always sign up)
 #   COPPER_CLOUD_INSTANCE_KEY    instance key (default: generated)
 #   COPPER_CLOUD_MASTER_KEY      master key, base64url 32 bytes (default: generated)
+#   COPPER_CLOUD_ADMIN_EMAIL     portal admin email (default: admin@<public host>)
+#   COPPER_CLOUD_ADMIN_PASSWORD  portal admin password, 10+ chars (default: generated, printed
+#                                once and saved to /etc/copper-cloud/admin-credentials, 0600)
+#   COPPER_CLOUD_ACCESS_MODE     directory|open for a fresh instance (default directory)
 #   COPPER_CLOUD_BINARY          local path to the copper-cloud binary or release .tar.gz
 #   COPPER_CLOUD_BINARY_URL      URL of the binary or release .tar.gz
 #   COPPER_CLOUD_VERSION         GitHub release to download (default: latest), e.g. 0.1.0
@@ -34,6 +42,7 @@ ETC=/etc/copper-cloud
 CONFIG=$ETC/copper-cloud.toml
 TLS_DIR=$ETC/tls
 LINK_FILE=$ETC/link-code
+ADMIN_FILE=$ETC/admin-credentials
 STATE_DIR=/var/lib/copper-cloud
 UNIT=/etc/systemd/system/copper-cloud.service
 SVC_USER=copper-cloud
@@ -103,7 +112,7 @@ UNIT_EOF
 }
 
 usage() {
-	sed -n '2,27p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
+	sed -n '2,36p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
 }
 
 # Run copper-cloud against the installed config with a clean environment, so installer
@@ -468,6 +477,93 @@ install_service() {
 	systemctl enable copper-cloud.service >/dev/null 2>&1
 }
 
+# ----------------------------------------------------------------------------------------
+# Admin portal + access mode
+
+# public_url from the config: host[:port] as clients see it.
+config_public_url() { sed -n 's/^public_url *= *"\([^"]*\)".*/\1/p' "$CONFIG" | head -n 1; }
+
+default_admin_email() {
+	host=$(config_public_url)
+	case "$host" in
+	\[*) host="" ;; # IPv6 literal: not usable as an email domain
+	*) host=${host%:*} ;;
+	esac
+	case "$host" in
+	*.*) printf 'admin@%s' "$host" ;;
+	*) printf 'admin@copper-cloud.local' ;;
+	esac
+}
+
+# "N thing(s)" summary line of an admin listing → N.
+count_of() { sed -n 's/^\([0-9][0-9]*\) [a-z]*(s)$/\1/p' | tail -n 1; }
+
+# Creates the portal admin unless one exists. On a fresh instance (no admin and no user
+# yet) also sets the access mode. Sets ADMIN_CREATED / ADMIN_EMAIL / ADMIN_PASSWORD /
+# ADMIN_GENERATED for the summary.
+ADMIN_CREATED=0
+ADMIN_GENERATED=0
+setup_admin() {
+	ADMIN_EMAIL=${COPPER_CLOUD_ADMIN_EMAIL:-$(default_admin_email)}
+	admins=$(cc admin list-admins)
+	admin_count=$(printf '%s\n' "$admins" | count_of)
+	if printf '%s\n' "$admins" | awk -v e="$ADMIN_EMAIL" 'NR > 1 && tolower($1) == tolower(e) { f = 1 } END { exit !f }'; then
+		log "portal admin $ADMIN_EMAIL exists (password unchanged)"
+		return
+	fi
+	if [ "${admin_count:-0}" != 0 ] && [ -z "${COPPER_CLOUD_ADMIN_EMAIL:-}" ]; then
+		log "keeping the existing portal admin account(s)"
+		return
+	fi
+	user_count=$(cc admin users | count_of)
+	if [ -n "${COPPER_CLOUD_ADMIN_PASSWORD:-}" ]; then
+		ADMIN_PASSWORD=$COPPER_CLOUD_ADMIN_PASSWORD
+	else
+		ADMIN_PASSWORD=$(random_alnum 24)
+		ADMIN_GENERATED=1
+	fi
+	printf '%s\n' "$ADMIN_PASSWORD" |
+		cc admin create-admin --email "$ADMIN_EMAIL" --password-stdin --if-missing >/dev/null
+	ADMIN_CREATED=1
+	(
+		umask 077
+		printf 'url=https://%s/\nemail=%s\npassword=%s\n' \
+			"$(config_public_url)" "$ADMIN_EMAIL" "$ADMIN_PASSWORD" >"$ADMIN_FILE.tmp"
+		mv -f "$ADMIN_FILE.tmp" "$ADMIN_FILE"
+	)
+	chmod 0600 "$ADMIN_FILE"
+	log "created portal admin $ADMIN_EMAIL (credentials in $ADMIN_FILE)"
+	if [ "${admin_count:-0}" = 0 ] && [ "${user_count:-0}" = 0 ]; then
+		mode=${COPPER_CLOUD_ACCESS_MODE:-directory}
+		case "$mode" in
+		open | directory) ;;
+		*) die "COPPER_CLOUD_ACCESS_MODE must be open or directory" ;;
+		esac
+		cc admin set-access-mode "$mode" >/dev/null
+		log "access mode: $mode"
+	elif [ "${user_count:-0}" != 0 ]; then
+		log "existing users found: access mode left as $(cc admin access-mode) (switch in the portal › Settings)"
+	fi
+}
+
+# The link code to hand to the first Copper: the instance link code in open mode; in
+# directory mode a one-account access key (kept across re-runs, revocable in the portal).
+write_link_code() {
+	umask 077
+	if [ "$(cc admin access-mode)" = directory ]; then
+		if [ -f "$LINK_FILE" ] && grep -q '#k=ck_' "$LINK_FILE"; then
+			return
+		fi
+		cc admin create-access-key --label "Installer link code" --max-uses 1 2>/dev/null |
+			tail -n 1 >"$LINK_FILE.tmp"
+		grep -q '^copper-cloud://' "$LINK_FILE.tmp" || die "could not mint the installer access key"
+	else
+		cc link-code >"$LINK_FILE.tmp"
+	fi
+	mv -f "$LINK_FILE.tmp" "$LINK_FILE"
+	chmod 0600 "$LINK_FILE"
+}
+
 uninstall() {
 	purge=$1
 	detect_platform
@@ -530,6 +626,7 @@ main() {
 	secure_files
 	log "applying database migrations"
 	cc migrate
+	setup_admin
 	install_service
 	open_firewall
 	log "starting copper-cloud"
@@ -546,18 +643,38 @@ main() {
 		fi
 	fi
 
-	umask 077
-	cc link-code >"$LINK_FILE.tmp"
-	mv -f "$LINK_FILE.tmp" "$LINK_FILE"
-	chmod 0600 "$LINK_FILE"
+	write_link_code
 	cc doctor >/dev/null 2>&1 || warn "copper-cloud doctor reported problems: run 'sudo copper-cloud --config $CONFIG doctor'"
+	mode=$(cc admin access-mode)
 
 	echo
-	echo "copper-cloud is running. Link code (Copper › Settings › Cloud › Connect):"
+	echo "copper-cloud is running."
+	echo
+	echo "Admin portal: https://$(config_public_url)/"
+	if [ "$ADMIN_CREATED" = 1 ]; then
+		echo "  email:    $ADMIN_EMAIL"
+		if [ "$ADMIN_GENERATED" = 1 ]; then
+			echo "  password: $ADMIN_PASSWORD   (shown once; also in $ADMIN_FILE)"
+		else
+			echo "  password: as given in COPPER_CLOUD_ADMIN_PASSWORD (also in $ADMIN_FILE)"
+		fi
+	else
+		echo "  sign in with your existing admin account (reset: sudo copper-cloud admin reset-admin-password --email …)"
+	fi
+	grep -q '^mode = "self-signed"' "$CONFIG" &&
+		echo "  (self-signed certificate: your browser will warn once; fingerprint below in the link code)"
+	echo
+	echo "Access mode: $mode"
+	if [ "$mode" = directory ]; then
+		echo "  Only personal access keys pass the gate: mint one per person in the portal › Access keys."
+		echo "  Link code for your first Copper (Settings › Cloud › Connect; creates one account):"
+	else
+		echo "  Anyone with the instance link code may connect. Link code (Settings › Cloud › Connect):"
+	fi
 	echo
 	echo "  $(cat "$LINK_FILE")"
 	echo
-	echo "Saved to $LINK_FILE (root only). Keep it secret: it contains the instance key."
+	echo "Saved to $LINK_FILE (root only). Keep it secret: it contains a gate key."
 	echo "Health: sudo copper-cloud --config $CONFIG doctor"
 }
 

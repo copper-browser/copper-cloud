@@ -1,8 +1,10 @@
-//! `copper-cloud admin …` — user and signup administration straight against the database.
+//! `copper-cloud admin …` — user, admin-account, access-mode and signup administration
+//! straight against the database.
 
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
 
 use anyhow::{bail, Context as _};
+use copper_cloud_core::access::{self, AccessMode, NewAccessKey};
 use copper_cloud_core::auth;
 use copper_cloud_core::config::Config;
 use copper_cloud_core::crypto::Crypto;
@@ -151,6 +153,105 @@ async fn dispatch(cfg: &Config, pool: &sqlx::PgPool, cmd: AdminCommand) -> anyho
                 "signup {} (the first user can always sign up)",
                 if on { "enabled" } else { "disabled" }
             );
+        }
+        AdminCommand::CreateAdmin {
+            email,
+            password,
+            if_missing,
+        } => {
+            if let Some(existing) = crate::admin_api::find_admin(pool, &email)
+                .await
+                .map_err(api)?
+            {
+                if if_missing {
+                    println!("admin {} already exists", existing.email);
+                    return Ok(());
+                }
+                bail!("an admin with email {} already exists", existing.email);
+            }
+            let password = password.resolve()?;
+            let admin = crate::admin_api::create_admin(pool, &email, password)
+                .await
+                .map_err(api)?;
+            println!("created admin {} ({})", admin.email, admin.id);
+        }
+        AdminCommand::ResetAdminPassword { email, password } => {
+            let admin = crate::admin_api::find_admin(pool, &email)
+                .await
+                .map_err(api)?
+                .with_context(|| format!("no admin with email {email}"))?;
+            let password = password.resolve()?;
+            let revoked = crate::admin_api::set_admin_password(pool, admin.id, password, None)
+                .await
+                .map_err(api)?;
+            println!(
+                "password reset for admin {}; revoked {revoked} session(s)",
+                admin.email
+            );
+        }
+        AdminCommand::ListAdmins => {
+            let admins = crate::admin_api::list_admins(pool).await.map_err(api)?;
+            println!("{:<40} {:<20} {:<20}", "EMAIL", "CREATED", "LAST LOGIN");
+            for a in &admins {
+                println!(
+                    "{:<40} {:<20} {:<20}",
+                    a.email,
+                    fmt_time(a.created_at),
+                    a.last_login_at.map_or_else(|| "-".to_owned(), fmt_time)
+                );
+            }
+            println!("{} admin(s)", admins.len());
+        }
+        AdminCommand::DeleteAdmin { email } => {
+            let deleted = sqlx::query("DELETE FROM admins WHERE lower(email) = lower($1)")
+                .bind(email.trim())
+                .execute(pool)
+                .await?
+                .rows_affected();
+            if deleted == 0 {
+                bail!("no admin with email {email}");
+            }
+            println!("deleted admin {email}");
+        }
+        AdminCommand::SetAccessMode { mode } => {
+            let mode = AccessMode::parse(&mode).context("mode must be open or directory")?;
+            access::set_access_mode(pool, mode).await.map_err(api)?;
+            println!("access mode: {mode} (running servers follow within 5 s)");
+        }
+        AdminCommand::AccessMode => {
+            let mode = access::load_access_mode(pool).await.map_err(api)?;
+            println!("{mode}");
+        }
+        AdminCommand::CreateAccessKey {
+            label,
+            email,
+            expires_in_days,
+            max_uses,
+        } => {
+            let email = email
+                .as_deref()
+                .map(auth::normalize_email)
+                .transpose()
+                .map_err(api)?;
+            let mut conn = pool.acquire().await?;
+            let (id, key) = access::mint_access_key(
+                &mut conn,
+                &NewAccessKey {
+                    label: &label,
+                    email: email.as_deref(),
+                    expires_in_days,
+                    max_uses,
+                    ..NewAccessKey::default()
+                },
+            )
+            .await
+            .map_err(api)?;
+            eprintln!("created access key {id} ({label}); shown once:");
+            println!("{key}");
+            match copper_cloud_core::tls::link_code(cfg) {
+                Ok(code) => println!("{}", code.with_key(&key)),
+                Err(err) => eprintln!("(no link code: {err:#})"),
+            }
         }
     }
     Ok(())

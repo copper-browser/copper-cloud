@@ -31,6 +31,17 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           [ "$crate" = "$tag" ] || { echo "tag $GITHUB_REF_NAME != crate version $crate"; exit 1; }
           echo "VERSION=$tag" >> "$GITHUB_ENV"
+      # The admin portal (Next.js static export) is embedded into the binary at build time.
+      - uses: oven-sh/setup-bun@v2
+        if: hashFiles('portal/package.json') != ''
+      - name: Build portal (portal/out)
+        run: |
+          if [ -f portal/package.json ]; then
+            cd portal && bun install --frozen-lockfile && bun run build
+            test -f out/index.html
+          else
+            echo "no portal/package.json; the binary will serve the 'portal not built' page"
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

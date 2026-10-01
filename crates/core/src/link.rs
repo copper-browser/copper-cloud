@@ -22,15 +22,40 @@ pub struct LinkCode {
     pub fingerprint: Option<String>,
 }
 
+impl LinkCode {
+    /// `copper-cloud://HOST:PORT/` (IPv6 hosts bracketed).
+    fn base(&self) -> String {
+        if self.host.contains(':') {
+            format!("{SCHEME}[{}]:{}/", self.host, self.port)
+        } else {
+            format!("{SCHEME}{}:{}/", self.host, self.port)
+        }
+    }
+
+    /// The same link with `key` (e.g. a per-person access key) in place of the instance key.
+    #[must_use]
+    pub fn with_key(&self, key: &str) -> Self {
+        Self {
+            instance_key: key.to_owned(),
+            ..self.clone()
+        }
+    }
+
+    /// Pairing link for a single-use pairing code:
+    /// `copper-cloud://HOST:PORT/#p=<code>&fp=<fp>` (`fp` as in the link code).
+    pub fn pairing_link(&self, code: &str) -> String {
+        let mut out = format!("{}#p={code}", self.base());
+        if let Some(fp) = &self.fingerprint {
+            out.push_str("&fp=");
+            out.push_str(fp);
+        }
+        out
+    }
+}
+
 impl fmt::Display for LinkCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(SCHEME)?;
-        if self.host.contains(':') {
-            write!(f, "[{}]", self.host)?;
-        } else {
-            f.write_str(&self.host)?;
-        }
-        write!(f, ":{}/#k={}", self.port, self.instance_key)?;
+        write!(f, "{}#k={}", self.base(), self.instance_key)?;
         if let Some(fp) = &self.fingerprint {
             write!(f, "&fp={fp}")?;
         }
@@ -139,6 +164,27 @@ mod tests {
             format!("copper-cloud://203.0.113.9:443/#k={KEY}&fp={fp}")
         );
         assert_eq!(s.parse::<LinkCode>().unwrap(), code);
+    }
+
+    #[test]
+    fn pairing_and_access_key_links() {
+        let code = LinkCode {
+            host: "2001:db8::1".into(),
+            port: 443,
+            instance_key: KEY.into(),
+            fingerprint: Some("b".repeat(64)),
+        };
+        assert_eq!(
+            code.pairing_link("cp_abc"),
+            format!(
+                "copper-cloud://[2001:db8::1]:443/#p=cp_abc&fp={}",
+                "b".repeat(64)
+            )
+        );
+        let ak = format!("ck_{}", crate::ids::random_token());
+        let with = code.with_key(&ak);
+        assert_eq!(with.to_string().parse::<LinkCode>().unwrap(), with);
+        assert!(with.to_string().contains(&format!("#k={ak}&fp=")));
     }
 
     #[test]

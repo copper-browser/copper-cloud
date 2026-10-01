@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::access::AccessModeCache;
 use crate::config::Config;
 use crate::crypto::Crypto;
 use crate::events::Events;
@@ -13,6 +14,8 @@ pub struct AppState {
     pub crypto: Crypto,
     pub events: Events,
     pub started_at: Instant,
+    /// `server_settings.access_mode`, cached for 5 s (see [`crate::access::access_mode`]).
+    pub access_mode: AccessModeCache,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -27,6 +30,7 @@ impl AppState {
             crypto,
             events: Events::new(),
             started_at: Instant::now(),
+            access_mode: AccessModeCache::default(),
         })
     }
 }
@@ -36,6 +40,7 @@ impl std::fmt::Debug for AppState {
         f.debug_struct("AppState")
             .field("cfg", &self.cfg)
             .field("events", &self.events)
+            .field("access_mode", &self.access_mode)
             .finish_non_exhaustive()
     }
 }

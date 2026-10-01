@@ -1,0 +1,17 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+next-env.d.ts
+*.tsbuildinfo
+
+# static export (embedded by the copper-cloud binary at build time)
+/out/*
+!/out/.gitkeep
+
+# misc
+.DS_Store
+*.pem
+.env*
+npm-debug.log*

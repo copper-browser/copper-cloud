@@ -19,8 +19,23 @@ output "db_endpoint" {
   sensitive   = false
 }
 
+output "admin_url" {
+  description = "Admin portal (sign in with admin_email + the password from admin_password_command; self-signed TLS warns once unless domain is set)."
+  value       = "https://${local.public_host != "" ? local.public_host : aws_instance.this.public_ip}/"
+}
+
+output "admin_email" {
+  description = "Email of the admin portal account created on first boot."
+  value       = var.admin_email != "" ? var.admin_email : "admin@${local.public_host != "" ? local.public_host : aws_instance.this.public_ip}"
+}
+
+output "admin_password_command" {
+  description = "Prints the initial admin portal password (SSM SecureString)."
+  value       = "aws ssm get-parameter --region ${var.region} --name ${aws_ssm_parameter.admin_password.name} --with-decryption --query Parameter.Value --output text"
+}
+
 output "link_code_command" {
-  description = "Prints the link code (paste into Copper › Settings › Cloud)."
+  description = "Prints the link code (paste into Copper › Settings › Cloud). In directory mode it is a one-account access key; mint more in the portal."
   value       = "aws ssm get-parameter --region ${var.region} --name ${aws_ssm_parameter.link_code.name} --with-decryption --query Parameter.Value --output text"
 }
 

@@ -105,6 +105,20 @@ resource "aws_ssm_parameter" "master_key" {
   value       = local.master_key
 }
 
+# Initial password of the portal admin (created by install.sh on first boot). Changing it
+# in the portal does not update this parameter; install.sh never resets an existing admin.
+resource "random_password" "admin" {
+  length  = 24
+  special = false
+}
+
+resource "aws_ssm_parameter" "admin_password" {
+  name        = "${local.ssm_prefix}/admin-password"
+  description = "copper-cloud ${var.name}: initial admin portal password (${local.admin_email_label})"
+  type        = "SecureString"
+  value       = random_password.admin.result
+}
+
 # Written by the VM. Terraform creates them (so destroy removes them) and
 # resets them to "pending" whenever the VM is replaced, so up.sh never reads a
 # stale "ready" from a previous VM.

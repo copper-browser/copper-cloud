@@ -77,3 +77,25 @@ variable "use_eip" {
   type        = bool
   default     = true
 }
+
+variable "admin_email" {
+  description = "Email of the admin portal account created on first boot. Empty = admin@<domain or public IP>."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.admin_email == "" || can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.admin_email))
+    error_message = "admin_email must be empty or an email address."
+  }
+}
+
+variable "access_mode" {
+  description = "Access mode of a fresh instance: \"directory\" (only personal access keys minted in the portal pass the gate) or \"open\" (the shared instance link code works for everyone). Later changes are made in the portal."
+  type        = string
+  default     = "directory"
+
+  validation {
+    condition     = contains(["directory", "open"], var.access_mode)
+    error_message = "access_mode must be \"directory\" or \"open\"."
+  }
+}

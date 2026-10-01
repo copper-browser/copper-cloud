@@ -34,11 +34,18 @@ What it does (every step is idempotent):
    An existing config is never modified.
 5. `copper-cloud tls-init` — self-signed certificate with the public host as SAN (skipped for
    ACME; an existing certificate is kept).
-6. `copper-cloud migrate`.
+6. `copper-cloud migrate`, then the portal admin: if no admin with
+   `COPPER_CLOUD_ADMIN_EMAIL` exists (and, without that variable, no admin at all),
+   `copper-cloud admin create-admin` with `COPPER_CLOUD_ADMIN_PASSWORD` or a generated
+   24-character password, saved to `/etc/copper-cloud/admin-credentials` (0600). On a
+   **fresh** instance (no admin and no user yet) it also sets the access mode
+   (`COPPER_CLOUD_ACCESS_MODE`, default `directory`); existing instances keep theirs.
 7. Installs `/etc/systemd/system/copper-cloud.service`, opens the port in ufw/firewalld when
    they are active, enables and (re)starts the service.
 8. Waits for `/healthz` (pinned TLS probe, 60 s; 180 s for ACME), writes the link code to
-   `/etc/copper-cloud/link-code` (0600) and prints it.
+   `/etc/copper-cloud/link-code` (0600) and prints it with the portal URL (and the admin
+   password when it generated one). In `directory` mode the link code is a one-account access
+   key ("Installer link code", kept across re-runs); in `open` mode it is the instance link code.
 
 Re-running upgrades the binary, applies migrations and restarts; keys, certificate, config and
 data stay.
@@ -52,7 +59,10 @@ data stay.
 | `COPPER_CLOUD_PORT` | `443` | listen + public port |
 | `COPPER_CLOUD_DOMAIN` | — | enables ACME (Let's Encrypt) for this domain (needs :443 reachable, DNS pointing here) |
 | `COPPER_CLOUD_ACME_EMAIL` | — | ACME account contact |
-| `COPPER_CLOUD_ALLOW_SIGNUP` | `true` | `false`: only the first user may sign up |
+| `COPPER_CLOUD_ALLOW_SIGNUP` | `true` | `false`: only the first user may sign up with the instance key (open mode) |
+| `COPPER_CLOUD_ADMIN_EMAIL` | `admin@<public host>` | portal admin account (`admin@copper-cloud.local` when the host is an IPv6 literal or has no dot) |
+| `COPPER_CLOUD_ADMIN_PASSWORD` | generated (24 chars, printed once) | portal admin password, ≥ 10 characters; never changes an existing admin |
+| `COPPER_CLOUD_ACCESS_MODE` | `directory` | fresh instances only: `directory` (personal access keys) or `open` (shared instance key) |
 | `COPPER_CLOUD_INSTANCE_KEY` | generated | ≥ 32 chars of `A-Za-z0-9-_.~` |
 | `COPPER_CLOUD_MASTER_KEY` | generated | base64url of exactly 32 bytes |
 | `COPPER_CLOUD_BINARY` | — | local binary or release tarball |

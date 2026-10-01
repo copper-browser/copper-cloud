@@ -5,14 +5,25 @@ RFC 3339 UTC strings. IDs are UUIDs (v7 for server-generated ones).
 
 ## Conventions
 
-### Instance key (every request except `/healthz`)
+### Gate credential (every `/v1` request except `POST /v1/auth/pair`)
 
 ```
-X-Copper-Instance: <instance_key>
+X-Copper-Instance: <instance key | access key>
 ```
 
-Missing or wrong → `401 {"error":"instance_key","message":"unauthorized"}`. This applies to
-every path, including unknown ones, so an unlinked client learns nothing about the server.
+The header carries **either** the shared instance key (accepted only while the instance's
+access mode is `open`) **or** a personal access key (`ck_` + 43 base64url characters, minted
+in the admin portal; accepted in both modes while not revoked and not expired). Missing or
+not accepted → `401 {"error":"instance_key","message":"unauthorized"}`. This applies to every
+`/v1` path, including unknown ones, so an unlinked client learns nothing about the server.
+
+* `open` (default for instances created before access keys existed): anyone with the instance
+  link code may connect; signup follows `allow_signup`.
+* `directory` (default for fresh installs): only access keys pass; signup needs one.
+
+The access mode is read through a 5-second cache: after an admin switches modes, Coppers see
+the change within 5 s. Paths outside `/v1` are not gated: `/healthz`, the admin API
+(`/admin/api/*`, see [admin-api.md](admin-api.md)) and the admin portal (every other path).
 
 ### Session
 
@@ -34,8 +45,9 @@ Always `{"error": "<code>", "message": "<text>"}`:
 | Status | `error` | When |
 |---|---|---|
 | 400 | `bad_request` | invalid JSON, field, domain, size of one entry, … |
-| 401 | `instance_key` / `session` / `credentials` / `account_disabled` | see above |
+| 401 | `instance_key` / `session` / `credentials` / `account_disabled` / `pairing_code` | see above |
 | 403 | `forbidden` | signup disabled; writing another device's `tabs:` doc |
+| 403 | `access_key_required` / `access_key_email` / `access_key_exhausted` | signup in `directory` mode without an access key; key bound to another email; key's `max_uses` reached |
 | 404 | `not_found` | unknown route / missing resource |
 | 409 | `conflict` | email taken; stale `base_version` (body carries the server copy) |
 | 413 | `payload_too_large` | body or payload over the configured limit |
@@ -44,8 +56,10 @@ Always `{"error": "<code>", "message": "<text>"}`:
 
 ### Rate limit
 
-`/v1/auth/*` (except `GET /v1/auth/me`) is limited to `limits.auth_per_minute` (default 10)
-requests per minute per client IP (IPv6: per /64), GCRA (bursts of 10, then one every 6 s).
+`/v1/auth/*` (except `GET /v1/auth/me` and `/v1/auth/pairing[/{id}]`, which need a session)
+is limited to `limits.auth_per_minute` (default 10) requests per minute per client IP (IPv6:
+per /64), GCRA (bursts of 10, then one every 6 s). This includes the ungated
+`POST /v1/auth/pair`. Admin login has its own bucket of the same size.
 Behind a proxy set `trust_proxy = true` so the right-most `X-Forwarded-For` hop is used.
 
 ### Request size limits
@@ -75,12 +89,15 @@ Key only (no session). Lets a client validate a link code before showing account
   "name": "copper-cloud",
   "version": "0.1.0",
   "signup": true,
+  "access_mode": "directory",
   "limits": { "max_blob_bytes": 8000000, "max_history_batch": 2000, "max_history_entry_bytes": 16384 }
 }
 ```
 
-`signup` is whether `POST /v1/auth/signup` will be accepted right now (always `true` while the
-instance has no users).
+`signup` is whether `POST /v1/auth/signup` will be accepted right now **for this gate
+credential**: always `true` with an access key (an email-bound key still needs its email; an
+exhausted key still gets `403 access_key_exhausted`); with the instance key, `allow_signup`
+(always `true` while the instance has no users). `access_mode` is `"open"` or `"directory"`.
 
 ---
 
@@ -102,8 +119,17 @@ instance has no users).
 - `display_name` optional (defaults to the email's local part); `device` optional (`id`
   defaults to a new UUID, `name` to `Copper`). Device ids are client-generated and scoped per
   user; reuse the same id for the same Copper install.
-- Allowed when `allow_signup` is effective (config, overridden by `admin enable-signup` /
-  `disable-signup`) **or** the instance has no users yet. Otherwise `403`.
+- With the **instance key** (open mode): allowed when `allow_signup` is effective (config,
+  overridden by `admin enable-signup` / `disable-signup` or the portal) **or** the instance
+  has no users yet. Otherwise `403 {"error":"forbidden"}`.
+- With an **access key** (either mode): always allowed — the admin minted the key — but if
+  the key carries an email, `email` must match it case-insensitively, else
+  `403 {"error":"access_key_email"}`. Each signup counts one use of the key; when its
+  `max_uses` is reached → `403 {"error":"access_key_exhausted"}` (the key keeps working for
+  everything else, so `max_uses: 1` is a one-person invite). A failed signup (e.g. `409`)
+  does not consume a use.
+- In `directory` mode without an access key → `403 {"error":"access_key_required"}` (in
+  practice the gate already answered `401 instance_key`).
 
 `200`:
 
@@ -115,7 +141,8 @@ instance has no users).
 }
 ```
 
-Errors: `400` (email/password), `403` (signup disabled), `409` (email exists), `429`.
+Errors: `400` (email/password), `403` (`forbidden` / `access_key_*`, see above), `409` (email
+exists), `429`.
 
 ### `POST /v1/auth/login`
 
@@ -125,7 +152,8 @@ Errors: `400` (email/password), `403` (signup disabled), `409` (email exists), `
 
 `200` same shape as signup (a new session for that device; the device row is created or its
 name updated). Wrong email or password → `401 {"error":"credentials"}` (identical, constant
-work). Disabled account → `401 {"error":"account_disabled"}`.
+work). Disabled account → `401 {"error":"account_disabled"}`. Any accepted gate credential
+works (access keys are not tied to an account for login).
 
 ### `POST /v1/auth/logout` 🔒
 
@@ -154,6 +182,70 @@ device can start pulling from 0, or from here to skip backfill.
 `200 {"ok": true, "revoked_sessions": 2}` — every *other* session is revoked. Wrong `old` →
 `401 {"error":"credentials"}`. Synced data is unaffected (data keys are wrapped by the server
 master key, not the password).
+
+---
+
+## Pairing codes
+
+A signed-in Copper mints a **single-use pairing code** that links *and* signs in another
+Copper in one step (no email/password typing). Codes are `cp_` + 32 base64url characters
+(24 random bytes), valid **10 minutes**, stored only as SHA-256.
+
+### `POST /v1/auth/pairing` 🔒
+
+Body optional: `{"device_name": "Ada's Mac mini"}` (used as the new device's name if it sends
+none). At most 20 active codes per user (`400` beyond).
+
+```json
+{
+  "id": "0192…",
+  "code": "cp_Q2b…(32 chars)",
+  "link": "copper-cloud://cloud.example.com:443/#p=cp_Q2b…&fp=9f86…",
+  "device_name": "Ada's Mac mini",
+  "created_at": "2026-10-01T12:00:00Z",
+  "expires_at": "2026-10-01T12:10:00Z"
+}
+```
+
+`code` is returned only here. `link` has the same host/port/`fp` as the link code, with
+`p=<code>` instead of `k=<key>`; Copper accepts either the bare `code` or the `link`.
+
+### `GET /v1/auth/pairing` 🔒
+
+My active (unused, unexpired) codes, newest first — never the code itself:
+`[{"id","device_name","created_by_device","created_at","expires_at"}]`.
+
+### `DELETE /v1/auth/pairing/{id}` 🔒
+
+Revokes one of my unused codes. `200 {"ok":true}`; unknown / used / not mine → `404`.
+
+### `POST /v1/auth/pair` — **no gate header**
+
+The code is the credential, so this is the one `/v1` route reachable without
+`X-Copper-Instance` (rate limited like `/v1/auth/*`).
+
+```json
+{ "code": "cp_Q2b…", "device": { "id": "uuid", "name": "Ada's Mac mini" } }
+```
+
+`200`:
+
+```json
+{
+  "token": "…43 chars",
+  "user":   { "id": "uuid", "email": "ada@example.com", "display_name": "Ada", "created_at": "…" },
+  "device": { "id": "uuid", "name": "Ada's Mac mini", "created_at": "…", "last_seen_at": "…" },
+  "gate_key": "ck_… | <instance key>"
+}
+```
+
+- The code is consumed atomically (a second use, even concurrent, gets `401`).
+- `gate_key` is what this Copper must send in `X-Copper-Instance` from now on (store it as the
+  link's key): in `open` mode the instance key; in `directory` mode a **fresh access key**
+  minted for this user (label `"<device name> via pairing"`, bound to the user's email,
+  visible and revocable in the portal).
+- Unknown, used, expired or revoked code → `401 {"error":"pairing_code"}`; the account is
+  disabled → `401 {"error":"account_disabled"}` (the code is not consumed).
 
 ---
 
@@ -332,6 +424,10 @@ TOKEN=$(curl -sk -H "$H" https://$HOST/v1/auth/signup \
 curl -sk -H "$H" -H "Authorization: Bearer $TOKEN" -X PUT https://$HOST/v1/sync/docs/settings \
   -d "{\"base_version\":0,\"payload\":\"$(printf '{"theme":"dark"}' | base64)\"}"
 curl -skN -H "$H" -H "Authorization: Bearer $TOKEN" https://$HOST/v1/sync/events
+
+# Pair a second Copper: mint a code on the first, redeem it (no gate header) on the second.
+CODE=$(curl -sk -H "$H" -H "Authorization: Bearer $TOKEN" -X POST https://$HOST/v1/auth/pairing | jq -r .code)
+curl -sk https://$HOST/v1/auth/pair -d "{\"code\":\"$CODE\",\"device\":{\"name\":\"second\"}}" | jq '{token, gate_key}'
 ```
 
 (`-k` because the certificate is self-signed; pin it instead in real clients — see

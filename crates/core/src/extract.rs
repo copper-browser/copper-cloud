@@ -25,6 +25,46 @@ where
     }
 }
 
+/// Like [`JsonBody`], but an empty (or whitespace-only) body yields `T::default()`.
+pub struct OptionalJsonBody<T, const LIMIT: usize>(pub T);
+
+impl<S, T, const LIMIT: usize> FromRequest<S> for OptionalJsonBody<T, LIMIT>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Default,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = read_body(req.into_body_with_len_check(LIMIT)?, LIMIT).await?;
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(Self(T::default()));
+        }
+        parse_json(&bytes).map(Self)
+    }
+}
+
+/// Query-string extractor whose rejection is a JSON 400 ([`ApiError::BadRequest`]).
+pub struct QueryParams<T>(pub T);
+
+impl<S, T> axum::extract::FromRequestParts<S> for QueryParams<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        axum::extract::Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|q| Self(q.0))
+            .map_err(|e| ApiError::bad_request(format!("invalid query string: {}", e.body_text())))
+    }
+}
+
 trait LenCheck {
     fn into_body_with_len_check(self, limit: usize) -> Result<Body, ApiError>;
 }

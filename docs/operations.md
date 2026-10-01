@@ -135,12 +135,56 @@ sudo copper-cloud admin enable-signup
 
 `--password` also works but lands in shell history; prefer `--password-stdin`.
 
+### Admin portal
+
+The binary serves a web admin portal at the instance root (`https://HOST[:PORT]/`) — the
+Next.js export in `portal/out`, embedded at build time. It manages access keys, people,
+devices, canvases, pairing codes and settings through `/admin/api/*`
+([admin-api.md](admin-api.md)). Release builds always embed it; a binary built without
+`portal/out` serves a one-line "portal not built" page at `/` (the API keeps working, and
+`doctor` says so).
+
+`install.sh` creates the first portal admin (`COPPER_CLOUD_ADMIN_EMAIL`, default
+`admin@<public host>`; `COPPER_CLOUD_ADMIN_PASSWORD`, default generated and printed once) and
+saves the credentials to `/etc/copper-cloud/admin-credentials` (`0600`). Re-runs never touch an
+existing admin. Manage admin accounts from the shell:
+
+```sh
+sudo copper-cloud admin list-admins
+sudo copper-cloud admin create-admin --email ops@example.com --password-stdin [--if-missing]
+sudo copper-cloud admin reset-admin-password --email ops@example.com --password-stdin
+sudo copper-cloud admin delete-admin --email ops@example.com
+```
+
+### Access mode and access keys
+
+```sh
+sudo copper-cloud admin access-mode                 # open | directory
+sudo copper-cloud admin set-access-mode directory   # running servers follow within 5 s
+sudo copper-cloud admin create-access-key --label "Ada" [--email ada@example.com] \
+    [--expires-in-days 30] [--max-uses 1]          # prints the key + its link code, once
+```
+
+- **open**: the shared instance link code (`copper-cloud link-code`) works for everyone;
+  access keys work too.
+- **directory** (fresh installs): only access keys pass the gate. Mint one per person in the
+  portal (Access keys › New key) and send them its link code; revoke it to cut that person's
+  Coppers off. On a fresh install `/etc/copper-cloud/link-code` holds a one-account access
+  key ("Installer link code") for your first Copper; `copper-cloud link-code` always prints the
+  instance-key form, which only works in open mode.
+- Switching an existing instance from open to directory disconnects every Copper still using
+  the instance key until it is re-linked with an access key (or paired from a signed-in
+  Copper, which hands it a personal key automatically).
+
 ## Troubleshooting
 
 | Symptom | Check |
 |---|---|
 | Copper says the certificate does not match | `copper-cloud link-code` and re-link; was `tls-init --force` run or the VM rebuilt without `tls/`? |
-| every request is 401 `instance_key` | the client's key differs from `instance_key` (env `COPPER_CLOUD_INSTANCE_KEY` overrides the file) |
+| every request is 401 `instance_key` | the client's key differs from `instance_key` (env `COPPER_CLOUD_INSTANCE_KEY` overrides the file); in `directory` mode the instance key is refused — give the person an access key; or their access key was revoked / expired (portal › Access keys) |
+| signup 403 `access_key_email` / `access_key_exhausted` | the access key is bound to another email / has created `max_uses` accounts already: mint a new key |
+| `/` says "portal not built" | the binary was built without `portal/out` (`cd portal && bun install && bun run build`, then rebuild); use a release build |
+| locked out of the portal | `sudo copper-cloud admin reset-admin-password --email …` (`list-admins` shows the emails) |
 | 429 on login | 10 auth requests/min/IP; behind a proxy set `trust_proxy = true` |
 | service restarts in a loop | `journalctl -u copper-cloud -n 50`: DB unreachable, bad config, port in use |
 | ACME never gets a certificate | DNS must point at the VM and :443 must be reachable from the internet; look for `acme` log lines; `tls.acme_staging = true` while testing |

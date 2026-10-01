@@ -15,6 +15,13 @@ pub fn random_token() -> String {
     URL_SAFE_NO_PAD.encode(random_bytes::<32>())
 }
 
+/// `true` for the shape [`random_token`] produces: exactly 43 base64url characters.
+pub fn is_token_shape(t: &str) -> bool {
+    t.len() == 43
+        && t.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// `N` random bytes from the OS CSPRNG.
 pub fn random_bytes<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];

@@ -44,7 +44,11 @@ pub async fn run(cfg: Config, migrate: bool) -> anyhow::Result<()> {
         });
     }
 
-    // Hourly cleanup of expired sessions.
+    if !crate::portal::portal_built() {
+        tracing::warn!("admin portal not built into this binary; / serves a placeholder");
+    }
+
+    // Hourly cleanup of expired sessions, admin sessions and pairing codes.
     {
         let pool = pool.clone();
         tokio::spawn(async move {
@@ -55,6 +59,16 @@ pub async fn run(cfg: Config, migrate: bool) -> anyhow::Result<()> {
                     Ok(0) => {}
                     Ok(n) => tracing::info!(removed = n, "purged expired sessions"),
                     Err(err) => tracing::warn!(error = %err, "session purge failed"),
+                }
+                match db::purge_expired_credentials(&pool).await {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        tracing::info!(
+                            removed = n,
+                            "purged expired admin sessions / pairing codes"
+                        );
+                    }
+                    Err(err) => tracing::warn!(error = %err, "credential purge failed"),
                 }
             }
         });

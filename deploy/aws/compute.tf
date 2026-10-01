@@ -12,6 +12,9 @@ locals {
   eip_ip      = var.use_eip ? aws_eip.this[0].public_ip : ""
   public_host = var.domain != "" ? var.domain : local.eip_ip
 
+  # Shown in the SSM parameter description / outputs; install.sh applies the same default.
+  admin_email_label = var.admin_email != "" ? var.admin_email : "admin@<public host>"
+
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
     name          = var.name
     region        = var.region
@@ -24,6 +27,8 @@ locals {
     acme_email    = var.acme_email
     allow_signup  = var.allow_signup ? "true" : "false"
     ssm_prefix    = local.ssm_prefix
+    admin_email   = var.admin_email
+    access_mode   = var.access_mode
   })
 }
 
@@ -102,6 +107,7 @@ resource "aws_instance" "this" {
     aws_ssm_parameter.database_url,
     aws_ssm_parameter.instance_key,
     aws_ssm_parameter.master_key,
+    aws_ssm_parameter.admin_password,
     aws_ssm_parameter.status,
     aws_ssm_parameter.link_code,
     aws_s3_object.binary,
