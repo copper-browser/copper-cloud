@@ -143,7 +143,7 @@ mod tests {
     fn empty_plaintext_roundtrip() {
         let key = Crypto::new_key();
         let sealed = Crypto::seal(&key, b"", b"");
-        assert!(Crypto::open(&key, b"", &sealed).unwrap().is_empty());
+        assert_eq!(Crypto::open(&key, b"", &sealed).unwrap().len(), 0);
     }
 
     #[test]

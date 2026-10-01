@@ -490,7 +490,7 @@ async fn sync_docs_lww() {
         .json()
         .await
         .unwrap();
-    assert!(list.is_empty());
+    assert_eq!(list.len(), 0, "list should be empty");
     assert_eq!(
         s.authed(Method::GET, "/v1/sync/docs/spaces", &b)
             .send()
@@ -663,7 +663,7 @@ async fn history_push_pull() {
         .json()
         .await
         .unwrap();
-    assert!(page["entries"].as_array().unwrap().is_empty());
+    assert_eq!(page["entries"].as_array().unwrap().len(), 0);
 
     // Pagination.
     let page: Value = s
@@ -744,7 +744,7 @@ async fn history_push_pull() {
         .json()
         .await
         .unwrap();
-    assert!(page["entries"].as_array().unwrap().is_empty());
+    assert_eq!(page["entries"].as_array().unwrap().len(), 0);
 }
 
 /// Read SSE frames until one with `event: <name>` arrives; returns its data JSON.
