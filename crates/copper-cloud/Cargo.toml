@@ -1,0 +1,17 @@
+[package]
+name = "copper-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "copper-cloud"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+copper-cloud-core = { path = "../core" }
+copper-cloud-canvas = { path = "../canvas" }

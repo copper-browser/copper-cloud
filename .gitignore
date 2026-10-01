@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+.env
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+deploy/aws/bin/
+*.tar.gz
