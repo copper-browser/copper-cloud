@@ -1,0 +1,52 @@
+[Unit]
+Description=Copper Cloud (sync + canvas server for the Copper browser)
+Documentation=https://github.com/copper-browser/copper-cloud
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=copper-cloud
+Group=copper-cloud
+Environment=COPPER_CLOUD_CONFIG=/etc/copper-cloud/copper-cloud.toml
+ExecStart=/usr/local/bin/copper-cloud serve
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=20
+LimitNOFILE=65536
+
+# Bind :443 without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Sandboxing. The config + certificate are read-only; ACME state lives in
+# /var/lib/copper-cloud (StateDirectory).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+StateDirectory=copper-cloud
+StateDirectoryMode=0750
+ReadOnlyPaths=/etc/copper-cloud
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

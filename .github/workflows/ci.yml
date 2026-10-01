@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    name: fmt + clippy + shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: shellcheck install.sh
+        run: shellcheck -s sh install.sh
+      - name: install.sh embedded unit matches packaging/copper-cloud.service
+        run: sh install.sh --print-unit | diff -u packaging/copper-cloud.service -
+
+  test:
+    name: cargo test (native PostgreSQL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The PostgreSQL that ships preinstalled on the ubuntu runner image. No containers.
+      - name: Start PostgreSQL
+        run: |
+          sudo systemctl start postgresql.service
+          sudo -u postgres createuser --superuser "$USER"
+          HBA=$(sudo -u postgres psql -tAc 'SHOW hba_file')
+          # CI-only: trust loopback so tests connect as the runner user without a password.
+          sudo sed -i '1i host all all 127.0.0.1/32 trust\nhost all all ::1/128 trust' "$HBA"
+          sudo -u postgres psql -qc 'SELECT pg_reload_conf()'
+          createdb -h localhost copper_cloud_test_core
+          createdb -h localhost copper_cloud_test_canvas
+          psql -h localhost -d copper_cloud_test_core -tAc 'SELECT version()'
+      - name: cargo test
+        run: cargo test --workspace --locked
+      - name: CLI smoke test
+        run: |
+          cargo run --locked -q -- init-config --write "$RUNNER_TEMP/cc.toml" \
+            --database-url postgres://localhost:5432/copper_cloud_test_core
+          cargo run --locked -q -- --config "$RUNNER_TEMP/cc.toml" tls-init
+          cargo run --locked -q -- --config "$RUNNER_TEMP/cc.toml" link-code | grep -q '^copper-cloud://localhost:8443/#k='

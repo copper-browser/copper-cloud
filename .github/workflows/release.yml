@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches the crate version
+        run: |
+          crate=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="copper-cloud"))')
+          tag="${GITHUB_REF_NAME#v}"
+          [ "$crate" = "$tag" ] || { echo "tag $GITHUB_REF_NAME != crate version $crate"; exit 1; }
+          echo "VERSION=$tag" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - name: Install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild
+      - name: Build (glibc 2.28 baseline)
+        env:
+          COPPER_CLOUD_GIT_SHA: ${{ github.sha }}
+        run: cargo zigbuild --release --locked -p copper-cloud --target ${{ matrix.target }}.2.28
+      - name: Package
+        run: |
+          name="copper-cloud-${VERSION}-linux-${{ matrix.arch }}"
+          stage="$RUNNER_TEMP/$name"
+          mkdir -p "$stage/packaging" dist
+          cp "target/${{ matrix.target }}/release/copper-cloud" "$stage/copper-cloud"
+          cp install.sh "$stage/install.sh"
+          cp packaging/copper-cloud.service "$stage/packaging/copper-cloud.service"
+          cp README.md "$stage/README.md"
+          chmod 0755 "$stage/copper-cloud" "$stage/install.sh"
+          file "$stage/copper-cloud"
+          # Files at the archive root: `tar xzf … && sudo ./install.sh`.
+          tar -C "$stage" -czf "dist/$name.tar.gz" copper-cloud install.sh packaging README.md
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          cat "dist/$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist && cat dist/*.sha256 > dist/SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
