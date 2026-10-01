@@ -1,0 +1,18 @@
+# Copy to state/<name>/terraform.tfvars (up.sh writes this file for you).
+name          = "demo"
+region        = "us-east-1"
+instance_type = "t3.small" # t4g.small → arm64 (needs the linux-aarch64 tarball)
+# db_instance_class = "db.t4g.micro"
+
+# Release tarball: copper-cloud-<ver>-linux-<x86_64|aarch64>.tar.gz
+binary_path = "/abs/path/to/deploy/aws/bin/v0.1.0/copper-cloud-0.1.0-linux-x86_64.tar.gz"
+
+# Optional: ACME TLS. Point an A record at the EIP (output public_ip) first.
+# domain     = "cloud.example.com"
+# acme_email = "ops@example.com"
+
+# Optional: SSH (otherwise use SSM Session Manager).
+# allow_ssh_cidr = "203.0.113.4/32"
+# ssh_key_name   = "my-keypair"
+
+allow_signup = true

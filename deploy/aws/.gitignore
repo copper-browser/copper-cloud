@@ -1,0 +1,9 @@
+# Per-deployment state + tfvars (contain secrets) and downloaded tarballs.
+state/
+bin/
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+# Keep the provider lock file committed (the root .gitignore ignores it).
+!.terraform.lock.hcl

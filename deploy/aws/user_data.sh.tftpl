@@ -1,0 +1,173 @@
+#!/bin/bash
+# copper-cloud cloud-init bootstrap (rendered by Terraform; deployment "${name}").
+#
+# Secrets (DATABASE_URL, instance key, master key) are NOT in this user data:
+# they are fetched from SSM SecureString with the instance role, with xtrace
+# off, so they never land in user data, the console log or the install log.
+#
+# Output goes only to /var/log/copper-cloud-install.log (0600) — not to the
+# console — because install.sh prints the link code, which embeds the key.
+set -Eeuxo pipefail # -E: the ERR trap also fires inside functions/subshells
+
+LOG=/var/log/copper-cloud-install.log
+install -m 0600 /dev/null "$LOG" 2>/dev/null || true
+exec >>"$LOG" 2>&1
+
+export DEBIAN_FRONTEND=noninteractive
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+export AWS_DEFAULT_REGION="${region}"
+export AWS_REGION="${region}"
+
+SSM_PREFIX="${ssm_prefix}"
+PKG_DIR=/tmp/copper-cloud-pkg
+TARBALL=/tmp/copper-cloud.tar.gz
+STEP=start
+
+echo "copper-cloud bootstrap start: $(date -u +%FT%TZ) deployment=${name} binary_sha256=${binary_sha256}"
+
+set_status() {
+  # Best effort: never let a status write abort the script (or recurse the trap).
+  aws ssm put-parameter --name "$SSM_PREFIX/status" --type String --overwrite \
+    --value "$1" >/dev/null 2>&1 || echo "WARN: could not write status '$1'"
+}
+
+on_err() {
+  local rc=$?
+  set +e
+  echo "FAILED at step '$STEP' (exit $rc)"
+  if command -v aws >/dev/null 2>&1; then
+    set_status "failed: $STEP"
+  fi
+  exit "$rc"
+}
+trap on_err ERR
+
+retry() {
+  # retry <attempts> <sleep-seconds> <cmd...>
+  local attempts=$1 delay=$2 n=1
+  shift 2
+  until "$@"; do
+    if [ "$n" -ge "$attempts" ]; then
+      return 1
+    fi
+    n=$((n + 1))
+    sleep "$delay"
+  done
+}
+
+imds() {
+  local token
+  token=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token \
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+  curl -fsS -H "X-aws-ec2-metadata-token: $token" "http://169.254.169.254/latest/meta-data/$1"
+}
+
+# --- 1. Wait for the Elastic IP ---------------------------------------------
+# Terraform associates the EIP right after the instance starts. Swapping the
+# public address mid-download breaks apt/snap, so wait for it first.
+STEP=wait-eip
+%{ if eip != "" ~}
+for _ in $(seq 1 120); do
+  if [ "$(imds public-ipv4 2>/dev/null || true)" = "${eip}" ]; then
+    break
+  fi
+  sleep 5
+done
+%{ else ~}
+# No Elastic IP: the auto-assigned public IPv4 is already attached at boot.
+%{ endif ~}
+echo "instance=$(imds instance-id) public-ipv4=$(imds public-ipv4 || echo none)"
+
+# --- 2. Packages ---------------------------------------------------------------
+STEP=apt
+# DPkg::Lock::Timeout waits for unattended-upgrades / cloud-init's own apt runs.
+apt_get() { apt-get -y -o DPkg::Lock::Timeout=900 "$@"; }
+retry 5 15 apt_get update
+retry 5 15 apt_get install --no-install-recommends ca-certificates curl tar gzip unzip
+
+STEP=awscli
+if ! command -v aws >/dev/null 2>&1; then
+  if command -v snap >/dev/null 2>&1 && snap wait system seed.loaded \
+    && retry 3 10 snap install aws-cli --classic; then
+    :
+  else
+    # Ubuntu 24.04 has no awscli .deb; fall back to the official v2 bundle.
+    retry 3 10 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip
+    rm -rf /tmp/aws
+    unzip -q /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install --update
+  fi
+fi
+aws --version
+
+# The instance profile can take a few seconds to become usable after launch.
+STEP=iam
+retry 30 10 aws sts get-caller-identity >/dev/null
+set_status installing
+
+# --- 3. Release tarball ------------------------------------------------------
+STEP=fetch-tarball
+retry 5 10 aws s3 cp "s3://${bucket}/${binary_key}" "$TARBALL" --only-show-errors
+echo "${binary_sha256}  $TARBALL" | sha256sum -c -
+
+STEP=extract
+rm -rf "$PKG_DIR"
+mkdir -p "$PKG_DIR"
+tar -xzf "$TARBALL" -C "$PKG_DIR"
+INSTALL_SH=$(find "$PKG_DIR" -maxdepth 3 -type f -name install.sh | head -n1)
+BINARY=$(find "$PKG_DIR" -maxdepth 3 -type f -name copper-cloud | head -n1)
+# (separate commands: a failing test in the middle of an && list would not trip set -e)
+test -n "$INSTALL_SH"
+test -n "$BINARY"
+chmod +x "$BINARY"
+
+# --- 4. Environment contract for install.sh -----------------------------------
+STEP=fetch-secrets
+get_secret() {
+  aws ssm get-parameter --name "$SSM_PREFIX/$1" --with-decryption \
+    --query Parameter.Value --output text
+}
+set +x
+DATABASE_URL=$(retry 5 5 get_secret database-url)
+COPPER_CLOUD_INSTANCE_KEY=$(retry 5 5 get_secret instance-key)
+COPPER_CLOUD_MASTER_KEY=$(retry 5 5 get_secret master-key)
+export DATABASE_URL COPPER_CLOUD_INSTANCE_KEY COPPER_CLOUD_MASTER_KEY
+set -x
+
+export COPPER_CLOUD_BINARY="$BINARY"
+%{ if public_host != "" ~}
+export COPPER_CLOUD_PUBLIC_HOST="${public_host}"
+%{ else ~}
+# No domain and no EIP: use the address the instance booted with.
+export COPPER_CLOUD_PUBLIC_HOST="$(imds public-ipv4)"
+%{ endif ~}
+export COPPER_CLOUD_ALLOW_SIGNUP="${allow_signup}"
+%{ if domain != "" ~}
+export COPPER_CLOUD_DOMAIN="${domain}"
+export COPPER_CLOUD_ACME_EMAIL="${acme_email}"
+%{ endif ~}
+
+# --- 5. Install ----------------------------------------------------------------
+STEP=install.sh
+(cd "$(dirname "$INSTALL_SH")" && bash "$INSTALL_SH")
+
+# --- 6. Publish the link code + status to SSM ----------------------------------
+STEP=link-code
+set +x
+if [ ! -s /etc/copper-cloud/link-code ]; then
+  (umask 077 && /usr/local/bin/copper-cloud link-code >/etc/copper-cloud/link-code)
+fi
+LINK_CODE=$(grep -m1 -o 'copper-cloud://[^[:space:]]*' /etc/copper-cloud/link-code || true)
+test -n "$LINK_CODE"
+aws ssm put-parameter --name "$SSM_PREFIX/link-code" --type SecureString --overwrite \
+  --value "$LINK_CODE" >/dev/null
+unset LINK_CODE DATABASE_URL COPPER_CLOUD_INSTANCE_KEY COPPER_CLOUD_MASTER_KEY
+set -x
+
+STEP=doctor
+/usr/local/bin/copper-cloud doctor || echo "WARN: copper-cloud doctor reported problems (see above)"
+systemctl is-active copper-cloud
+
+rm -rf "$PKG_DIR" "$TARBALL"
+set_status ready
+echo "copper-cloud bootstrap done: $(date -u +%FT%TZ)"
