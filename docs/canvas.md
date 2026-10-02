@@ -16,11 +16,12 @@ the rest of the [API](api.md). Errors use the common `{"error","message"}` shape
 | `canvases` | `id`, `owner_id`, `name`, `kind` (`personal`/`shared`), `doc_key_wrapped`, timestamps |
 | `canvas_members` | `(canvas_id, user_id)`, `role` (`owner`/`editor`), `added_at` — the owner has a row too |
 | `canvas_invites` | email invites: `email` (lower-cased), `invited_by`, `status` (`pending`/`accepted`/`declined`), `token` (hash, reserved) |
+| `canvas_share_links` | opaque share-link token digest, `role` (`editor`), `created_by`, `uses`; tokens are never persisted in plaintext |
 | `canvas_updates` | append-only Yjs update log: `seq bigserial`, `canvas_id`, `"update"` (sealed) |
 | `canvas_snapshots` | one compacted state per canvas: `seq` (last update folded in), `state` (sealed) |
 
-Migrations: `crates/copper-cloud/migrations/0100_canvases.sql` (the canvas crate owns
-`0100`–`0199`).
+Migrations: `crates/copper-cloud/migrations/0100_canvases.sql` and
+`0101_canvas_share_links.sql` (the canvas crate owns `0100`–`0199`).
 
 - **Personal canvas**: every user has exactly one (`kind = personal`, name `Personal`),
   created on first use (`GET /canvases`, or any `/canvases/personal/...` route) — a unique
@@ -108,6 +109,37 @@ Pending invites addressed to **your** email (case-insensitive), with canvas name
 Only the invitee can accept or decline; anything else (wrong user, already used, declined,
 unknown) is `404`. Invites are single-use.
 
+### Canvas share links
+
+`POST /canvases/{id}/links` is available to any member. The body may be `{}` or
+`{"role":"editor"}`; `owner` and other roles are rejected with `400`. It returns `201` and the
+one-time-visible token:
+
+```json
+{"id":"uuid","token":"<43 chars>","canvas_id":"uuid","role":"editor","created_at":"…"}
+```
+
+Owners can list links with `GET /canvases/{id}/links`:
+
+```json
+{"links":[{"id":"uuid","role":"editor","created_by":"uuid","created_at":"…","uses":3}]}
+```
+
+Tokens are omitted from lists. Owners revoke one (`DELETE .../links/{link_id}`) or every link
+(`DELETE .../links`); both return `204`. A missing link on these owner-scoped routes is `404`.
+
+A signed-in user can preview `GET /canvas-links/{token}` without being a member:
+`{"canvas_id","name","owner":{"id","display_name"},"role","member"}`. Unknown,
+revoked, or deleted-canvas tokens return `404` with `error: "link_not_found"`.
+
+`POST /canvas-links/{token}/join` is safe to retry. It adds an editor membership when needed,
+never downgrades an existing owner, accepts/removes a pending email invite for the caller,
+increments the link's `uses`, publishes the normal `member_added` canvas event, and returns the
+same canvas object as one item from `GET /canvases`.
+
+Share links are unavailable for Personal canvases. They never expire on their own; deleting a
+canvas cascades its links.
+
 ### `GET /canvases/{id}/state[?sv=<base64>]`
 
 `{"state": "<base64 of encode_state_as_update_v1>"}` — the whole document as one Yjs update
@@ -118,6 +150,14 @@ vector is missing is returned. Apply with `Y.applyUpdate(doc, bytes)`.
 
 The agent-friendly read format (see [canvas-protocol.md](canvas-protocol.md#read)), identical
 to the page's `copperCanvas.read`. Text is cut to 500 characters unless `full=true`.
+
+### `GET /people`
+
+Any signed-in user may list active accounts on this instance (excluding themselves):
+`{"people":[{"id","display_name","email"}]}`. `q` is a case-insensitive substring filter
+on display name or email; results are sorted by display name. `limit` defaults to 20 and is
+capped at 50. This is an intentional team-server directory surface; it is not restricted to
+canvas members.
 
 ### `POST /canvases/{id}/ops`
 
@@ -218,6 +258,15 @@ awareness table, and one `tokio::sync::broadcast` channel (256 frames) fanned ou
 | `canvas_ws_bytes_in_total` / `canvas_ws_bytes_out_total` | counter | WebSocket payload bytes |
 
 `copper_cloud_canvas::rooms_metrics()` returns the live `{rooms, peers}` counts.
+
+## Web share-link landing page
+
+`GET /join/{token}` is outside `/v1` and the instance-key gate. It returns a tiny self-contained
+HTML page with an `Open this canvas in Copper` handoff when the request `Host` is a valid hostname
+or IP with an optional port. It never looks up the token or includes canvas data. Invalid Host
+headers receive a safe fallback message instead of a custom-scheme URL. The response is
+`Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`,
+and CSP `default-src 'none'; style-src 'unsafe-inline'`.
 
 ## Security model
 

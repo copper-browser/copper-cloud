@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 or from a release tarball:
 
 ```sh
-tar xzf copper-cloud-0.1.0-linux-x86_64.tar.gz && sudo ./install.sh
+tar xzf copper-cloud-0.3.0-linux-x86_64.tar.gz && sudo ./install.sh
 ```
 
 The installer sets up Postgres (unless you pass `DATABASE_URL`), a `copper-cloud` system user,
@@ -102,6 +102,7 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
   encryption at rest, TLS pinning
 - [Install](docs/install.md) — VM one-liner, manual install, configuration reference
 - [Operations](docs/operations.md) — doctor, logs, metrics, backups, upgrades
+- [v0.3.0 release notes](docs/v0.3.0.md)
 
 ## Development
 

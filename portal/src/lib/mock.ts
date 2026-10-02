@@ -106,8 +106,9 @@ let devices: Device[] = deviceSpecs.map(([email, name, created, seen], i) => {
   };
 });
 
-interface CanvasRow extends Omit<Canvas, "member_count"> {
+interface CanvasRow extends Omit<Canvas, "member_count" | "share_link_count"> {
   members: string[];
+  share_link_count: number;
 }
 
 const personalOwners = [
@@ -194,6 +195,7 @@ let canvases: CanvasRow[] = [
       owner_id: u.id,
       owner_email: u.email,
       members: [u.id, ...others.map((e) => userByEmail(e).id)],
+      share_link_count: i % 3,
       created_at: ago(created),
       updated_at: ago(updated),
     };
@@ -208,6 +210,7 @@ let canvases: CanvasRow[] = [
       owner_id: u.id,
       owner_email: u.email,
       members: [u.id],
+      share_link_count: 0,
       created_at: new Date(created + HOUR).toISOString(),
       updated_at: ago((i * 7 + 2) * HOUR),
     };
@@ -484,7 +487,7 @@ function toCanvas(c: CanvasRow): Canvas {
 
 function overview(): Overview {
   return {
-    version: "0.1.0 (3f9c2ab)",
+    version: "0.3.0 (3f9c2ab)",
     uptime_s: Math.floor((Date.now() - BOOTED_AT) / 1000),
     access_mode: settings.access_mode,
     allow_signup: settings.allow_signup,

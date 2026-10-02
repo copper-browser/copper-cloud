@@ -49,6 +49,7 @@ Always `{"error": "<code>", "message": "<text>"}`:
 | 403 | `forbidden` | signup disabled; writing another device's `tabs:` doc |
 | 403 | `access_key_required` / `access_key_email` / `access_key_exhausted` | signup in `directory` mode without an access key; key bound to another email; key's `max_uses` reached |
 | 404 | `not_found` | unknown route / missing resource |
+| 404 | `link_not_found` | unknown, revoked, or deleted-canvas share link |
 | 409 | `conflict` | email taken; stale `base_version` (body carries the server copy) |
 | 413 | `payload_too_large` | body or payload over the configured limit |
 | 429 | `rate_limited` | auth rate limit (header `Retry-After: 60`) |
@@ -87,7 +88,7 @@ Key only (no session). Lets a client validate a link code before showing account
 ```json
 {
   "name": "copper-cloud",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "signup": true,
   "access_mode": "directory",
   "limits": { "max_blob_bytes": 8000000, "max_history_batch": 2000, "max_history_entry_bytes": 16384 }
@@ -408,9 +409,45 @@ Mounted under the same `/v1` gate and session auth; documented in
 
 `GET/POST /v1/canvases`, `GET/PATCH/DELETE /v1/canvases/{id}`, `GET /v1/canvases/{id}/members`,
 `DELETE /v1/canvases/{id}/members/{user_id}`, `GET/POST /v1/canvases/{id}/invites`,
-`GET /v1/invites`, `POST /v1/invites/{id}/accept|decline`, `GET /v1/canvases/{id}/ws`
+`GET /v1/invites`, `POST /v1/invites/{id}/accept|decline`,
+`POST/GET/DELETE /v1/canvases/{id}/links` (and `DELETE .../links/{link_id}`),
+`GET /v1/canvas-links/{token}`, `POST /v1/canvas-links/{token}/join`,
+`GET /v1/people`, `GET /v1/canvases/{id}/ws`
 (WebSocket, Yjs sync protocol), `GET /v1/canvases/{id}/state`, `GET /v1/canvases/{id}/read`,
 `POST /v1/canvases/{id}/ops`.
+
+### People
+
+`GET /v1/people` is available to any signed-in user on the instance. It returns active accounts
+(excluding the caller), sorted by display name:
+
+```json
+{"people":[{"id":"uuid","display_name":"Ada","email":"ada@example.com"}]}
+```
+
+`q` is a case-insensitive substring filter over display name or email. `limit` defaults to 20
+and is capped at 50.
+
+### Canvas share links
+
+Any canvas member can create an editor link (`POST /v1/canvases/{id}/links`, body `{}` or
+`{"role":"editor"}`):
+
+```json
+{"id":"uuid","token":"<43-char token>","canvas_id":"uuid","role":"editor","created_at":"2026-10-01T12:00:00Z"}
+```
+
+The token is returned only from creation. Owners can list links (`GET .../links`) and revoke one
+or all (`DELETE .../links/{link_id}`, `DELETE .../links`, both `204`). The list contains `id`,
+`role`, `created_by`, `created_at` and `uses`, never tokens. Preview (`GET /v1/canvas-links/{token}`)
+returns the canvas name, owner id/display name, link role and whether the caller is already a
+member; unknown or revoked tokens return `404 {"error":"link_not_found"}`. Joining
+(`POST .../join`) is idempotent, adds an editor membership without downgrading an owner, removes
+a pending email invite, increments `uses`, and returns the normal canvas list item. Link tokens
+are 32 random bytes encoded base64url without padding and stored only as SHA-256 digests.
+
+`GET /join/{token}` is an ungated, no-store HTML handoff page for web links; it does not look up
+the token or reveal canvas data.
 
 ---
 

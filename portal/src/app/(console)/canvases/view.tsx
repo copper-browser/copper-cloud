@@ -101,6 +101,16 @@ export function CanvasesView() {
       cell: (c) => <span className="tabular-nums">{formatCount(c.member_count)}</span>,
     },
     {
+      id: "share-links",
+      header: "Share links",
+      align: "right",
+      className: "w-[104px]",
+      skeleton: "w-5",
+      cell: (c) => (
+        <span className="tabular-nums">{formatCount(c.share_link_count)}</span>
+      ),
+    },
+    {
       id: "updated",
       header: "Updated",
       className: "w-24 pl-5",

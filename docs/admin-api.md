@@ -152,7 +152,7 @@ redirect — check the code). `new` shorter than 10 chars → `400`.
 
 ```json
 {
-  "version": "0.1.0 (abc1234)",
+  "version": "0.3.0 (abc1234)",
   "uptime_s": 86400,
   "access_mode": "directory",
   "allow_signup": true,
@@ -385,12 +385,14 @@ Canvas object (content is never exposed):
   "owner_id": "0192f1d0-…",
   "owner_email": "ana@example.com",
   "member_count": 3,
+  "share_link_count": 2,
   "created_at": "…",
   "updated_at": "…"
 }
 ```
 
-`kind`: `"personal" | "shared"`.
+`kind`: `"personal" | "shared"`. `share_link_count` counts active (not revoked) canvas
+share links; link tokens and canvas content are never exposed to the admin API.
 
 ### `GET /admin/api/canvases?limit=&offset=&kind=`
 

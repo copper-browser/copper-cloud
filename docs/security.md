@@ -125,7 +125,22 @@ rustls only (ring provider), TLS 1.2+ with rustls' safe defaults; HTTP/2 or HTTP
 
 Every query that touches user data is filtered by the authenticated `user_id` (docs, history,
 devices, sessions). `tabs:<device_id>` docs are writable only by the owning device. Canvas
-access is checked per membership by the canvas crate.
+access is checked per membership by the canvas crate. Share-link preview and join routes require
+an active session; disabled accounts have no valid sessions and cannot use links. Link joins are
+serialized on the link row, use the membership primary key for idempotency, and never replace an
+existing owner role.
+
+`GET /v1/people` is intentionally a team-server directory: any signed-in user of an instance
+can list its active users (excluding themselves), optionally filtering by a case-insensitive
+substring of display name or email. Deleted accounts are absent and disabled accounts are
+excluded.
+
+### Share-link tokens
+
+A random 32-byte secret is generated for every canvas share link, but only its SHA-256 digest is
+stored. The plaintext is returned only from link creation, never from list/preview responses and
+never in logs. Owners can revoke one or all links; deleting a canvas cascades its links. Email
+invite tokens follow the same digest-only storage rule.
 
 ### Encryption at rest
 

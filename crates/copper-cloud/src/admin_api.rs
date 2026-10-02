@@ -1077,6 +1077,7 @@ struct CanvasRow {
     owner_id: Uuid,
     owner_email: String,
     member_count: i64,
+    share_link_count: i64,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -1096,6 +1097,7 @@ async fn list_canvases(
     let items = sqlx::query_as::<_, CanvasRow>(
         "SELECT c.id, c.name, c.kind, c.owner_id, u.email AS owner_email,
                 (SELECT count(*) FROM canvas_members m WHERE m.canvas_id = c.id) AS member_count,
+                (SELECT count(*) FROM canvas_share_links l WHERE l.canvas_id = c.id) AS share_link_count,
                 c.created_at, c.updated_at
          FROM canvases c JOIN users u ON u.id = c.owner_id
          WHERE ($1::text IS NULL OR c.kind = $1)

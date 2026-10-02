@@ -18,6 +18,7 @@ use copper_cloud_core::state::SharedState;
 pub fn build_app(state: SharedState) -> Router {
     let root = Router::new()
         .nest("/admin/api", admin_api::router())
+        .merge(copper_cloud_canvas::landing_router())
         .fallback(portal::serve);
     copper_cloud_core::app_with(state, copper_cloud_canvas::router(), root)
 }

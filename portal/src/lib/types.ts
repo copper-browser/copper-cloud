@@ -172,6 +172,7 @@ export interface Canvas {
   owner_id: string;
   owner_email: string;
   member_count: number;
+  share_link_count: number;
   created_at: string;
   updated_at: string;
 }

@@ -26,6 +26,12 @@ pub enum ApiError {
     /// 404
     #[error("not found")]
     NotFound,
+    /// 404 with a route-specific machine-readable code.
+    #[error("not found: {code}")]
+    NotFoundCode {
+        code: &'static str,
+        message: &'static str,
+    },
     /// 409 — the value is merged into the body (objects) so the client gets the server copy.
     #[error("conflict")]
     Conflict(Value),
@@ -54,7 +60,7 @@ impl ApiError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden | Self::Denied { .. } => StatusCode::FORBIDDEN,
-            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::NotFound | Self::NotFoundCode { .. } => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -66,7 +72,9 @@ impl ApiError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::BadRequest(_) => "bad_request",
-            Self::Unauthorized(code) | Self::Denied { code, .. } => code,
+            Self::Unauthorized(code)
+            | Self::Denied { code, .. }
+            | Self::NotFoundCode { code, .. } => code,
             Self::Forbidden => "forbidden",
             Self::NotFound => "not_found",
             Self::Conflict(_) => "conflict",
@@ -85,7 +93,9 @@ impl IntoResponse for ApiError {
             Self::BadRequest(msg) => json!({ "error": code, "message": msg }),
             Self::Unauthorized(_) => json!({ "error": code, "message": "unauthorized" }),
             Self::Forbidden => json!({ "error": code, "message": "forbidden" }),
-            Self::Denied { message, .. } => json!({ "error": code, "message": message }),
+            Self::Denied { message, .. } | Self::NotFoundCode { message, .. } => {
+                json!({ "error": code, "message": message })
+            }
             Self::NotFound => json!({ "error": code, "message": "not found" }),
             Self::Conflict(Value::Object(mut map)) => {
                 map.insert("error".into(), Value::from(code));

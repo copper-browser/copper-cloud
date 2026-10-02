@@ -28,7 +28,7 @@
 #   COPPER_CLOUD_ACCESS_MODE     directory|open for a fresh instance (default directory)
 #   COPPER_CLOUD_BINARY          local path to the copper-cloud binary or release .tar.gz
 #   COPPER_CLOUD_BINARY_URL      URL of the binary or release .tar.gz
-#   COPPER_CLOUD_VERSION         GitHub release to download (default: latest), e.g. 0.1.0
+#   COPPER_CLOUD_VERSION         GitHub release to download (default: latest), e.g. 0.3.0
 #   GITHUB_TOKEN                 token for downloading from a private GitHub repository
 #
 # Flags: --uninstall (remove service + binary, keep data), --purge (also delete config,
