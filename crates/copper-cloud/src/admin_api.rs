@@ -23,6 +23,7 @@ use copper_cloud_core::config::TlsMode;
 use copper_cloud_core::error::{is_unique_violation, ApiError, ApiResult};
 use copper_cloud_core::extract::{JsonBody, QueryParams};
 use copper_cloud_core::ids;
+use copper_cloud_core::intelligence;
 use copper_cloud_core::state::{AppState, SharedState};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -61,6 +62,12 @@ pub fn router() -> Router<SharedState> {
         .route("/pairing-codes", get(list_pairing_codes))
         .route("/pairing-codes/{id}", delete(revoke_pairing_code))
         .route("/audit", get(list_audit))
+        .route(
+            "/intelligence",
+            get(get_intelligence)
+                .put(put_intelligence)
+                .delete(delete_intelligence),
+        )
         .fallback(copper_cloud_core::app::not_found)
         .layer(from_fn(guard))
 }
@@ -585,6 +592,61 @@ async fn patch_settings(
     // This process follows immediately; other processes within the 5 s TTL.
     state.access_mode.clear();
     Ok(Json(settings_view(&state).await?))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Intelligence keys (cloud-wide Jev + router keys; the admin only ever sees the last 4 chars)
+
+fn intelligence_actor(s: &AdminSession) -> intelligence::Actor {
+    intelligence::Actor::Admin {
+        id: s.admin_id,
+        email: s.email.clone(),
+    }
+}
+
+async fn get_intelligence(
+    State(state): State<SharedState>,
+    _s: AdminSession,
+) -> ApiResult<Json<Value>> {
+    let settings = intelligence::load(&state.db, &state.crypto).await?;
+    Ok(Json(settings.masked_view()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntelligencePut {
+    #[serde(default)]
+    jev: intelligence::Change<intelligence::JevInput>,
+    #[serde(default)]
+    router: intelligence::Change<intelligence::RouterInput>,
+    enabled: Option<bool>,
+}
+
+async fn put_intelligence(
+    State(state): State<SharedState>,
+    s: AdminSession,
+    JsonBody(req): JsonBody<IntelligencePut, BODY_LIMIT>,
+) -> ApiResult<Json<Value>> {
+    let update = intelligence::Update {
+        jev: req.jev,
+        router: req.router,
+        enabled: req.enabled,
+    };
+    let settings = if update.is_noop() {
+        intelligence::load(&state.db, &state.crypto).await?
+    } else {
+        intelligence::apply(&state.db, &state.crypto, &intelligence_actor(&s), &update).await?
+    };
+    Ok(Json(settings.masked_view()))
+}
+
+async fn delete_intelligence(
+    State(state): State<SharedState>,
+    s: AdminSession,
+) -> ApiResult<Json<Value>> {
+    intelligence::clear(&state.db, &intelligence_actor(&s)).await?;
+    let settings = intelligence::load(&state.db, &state.crypto).await?;
+    Ok(Json(settings.masked_view()))
 }
 
 // ---------------------------------------------------------------------------------------------

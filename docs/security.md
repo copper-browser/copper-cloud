@@ -142,12 +142,37 @@ stored. The plaintext is returned only from link creation, never from list/previ
 never in logs. Owners can revoke one or all links; deleting a canvas cascades its links. Email
 invite tokens follow the same digest-only storage rule.
 
+### Cloud-wide intelligence keys
+
+An admin can store one Jev (TypeSafe) key and one LLM router (LiteLLM) key per instance; every
+signed-in user receives them in clear from `GET /v1/intelligence`. This is deliberate: the keys
+are shared credentials of the instance, so **anyone who can sign in can use (and copy) them**.
+Scope them accordingly — prefer a dedicated LiteLLM virtual key with its own budget per
+instance over a personal key, and rotate by setting a new key (Coppers pick it up on their
+next fetch; `updated_at` changes).
+
+- Storage: `intelligence_settings` (singleton row). A random 32-byte data key is wrapped by the
+  KEK (`data_key_wrapped`); each API key is AES-256-GCM sealed under it with AAD
+  `intelligence:jev` / `intelligence:router`. Endpoint, model and URL are plaintext.
+- Reads require the gate credential **and** a valid user session (disabled users have none).
+  The response is `Cache-Control: no-store`. The admin toggle `enabled = false` withholds the
+  keys without deleting them.
+- Admin surfaces are write-only: the admin API, portal and `copper-cloud intelligence show`
+  only ever show the last four characters (none for keys under 12 characters).
+- The CLI reads keys from files or stdin (`--jev-key-file F`, `--router-key-file -`), never
+  from argv, so they stay out of shell history and `ps`.
+- Every change (`intelligence.update` / `intelligence.clear`, admin or CLI) and user reads
+  (`intelligence.read`, at most once per user per hour) are written to `admin_audit`; audit
+  details and logs never contain key material.
+
 ### Encryption at rest
 
 ```
 master_key (config, 32 B) ──HKDF-SHA256(salt "copper-cloud", info "copper-cloud/v1/key-encryption-key")──▶ KEK
-KEK ──AES-256-GCM(aad "copper-cloud/v1/wrapped-key")──▶ users.data_key_wrapped, canvases.doc_key_wrapped
+KEK ──AES-256-GCM(aad "copper-cloud/v1/wrapped-key")──▶ users.data_key_wrapped, canvases.doc_key_wrapped,
+                                                        intelligence_settings.data_key_wrapped
 data_key ──AES-256-GCM(nonce 12 B random, aad "<user_id>:<domain>")──▶ sync_docs.payload, history.payload
+intelligence data_key ──AES-256-GCM(aad "intelligence:jev" | "intelligence:router")──▶ jev_key_sealed, router_key_sealed
 ```
 
 - Sealed blob layout: `nonce(12) ‖ ciphertext ‖ tag(16)`.
@@ -175,7 +200,7 @@ it and minting a new one in the portal.
 
 Request spans record method, path (never the query string), matched route, client IP,
 `user_id`, status and latency. Never logged: tokens, passwords, instance/master keys, access
-keys, pairing codes, admin cookies, request or response bodies, payloads (access keys and
+keys, intelligence (Jev / router) keys, pairing codes, admin cookies, request or response bodies, payloads (access keys and
 pairing codes are logged by id only). `Config`'s `Debug` redacts keys and the database password.
 500s log the internal error chain server-side only; clients get `{"error":"internal"}`.
 

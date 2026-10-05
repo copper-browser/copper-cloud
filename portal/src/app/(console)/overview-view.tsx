@@ -13,6 +13,7 @@ import {
   PlusIcon,
   RectangleEllipsisIcon,
   SettingsIcon,
+  SparklesIcon,
   UserIcon,
   UserMinusIcon,
   UserXIcon,
@@ -45,6 +46,7 @@ const AUDIT_ICONS: Record<AuditIcon, LucideIcon> = {
   device: LaptopIcon,
   canvas: FrameIcon,
   pairing: LinkIcon,
+  ai: SparklesIcon,
   other: ActivityIcon,
 };
 
@@ -274,7 +276,9 @@ function ActivityList({
         const self = !!selfId && entry.admin_id === selfId;
         const line = describeAudit(entry, self);
         const Icon = AUDIT_ICONS[line.icon];
-        const actor = self ? "You" : (entry.admin_email ?? "A deleted admin");
+        const actor = self
+          ? "You"
+          : (entry.admin_email ?? line.actor ?? "A deleted admin");
         return (
           <li
             key={entry.id}

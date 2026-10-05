@@ -12,6 +12,7 @@ export type AuditIcon =
   | "device"
   | "canvas"
   | "pairing"
+  | "ai"
   | "other";
 
 export interface AuditLine {
@@ -22,6 +23,8 @@ export interface AuditLine {
   object?: string;
   /** Trailing plain text. */
   suffix?: string;
+  /** Who did it, for rows without an admin (server CLI, a person's Copper). */
+  actor?: string;
 }
 
 const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
@@ -90,6 +93,32 @@ export function describeAudit(entry: AuditEntry, self: boolean): AuditLine {
       return { icon: "device", verb: "removed a device" };
     case "canvas.delete":
       return { icon: "canvas", verb: "deleted canvas", object: str(d.name) };
+    case "intelligence.update": {
+      const parts: string[] = [];
+      if (d.jev === null) parts.push("removed the Jev key");
+      else if (d.jev) parts.push("updated the Jev settings");
+      if (d.router === null) parts.push("removed the router key");
+      else if (d.router) parts.push("updated the router settings");
+      if (d.enabled === true) parts.push("turned AI key sharing on");
+      if (d.enabled === false) parts.push("turned AI key sharing off");
+      return {
+        icon: "ai",
+        verb: parts.length ? parts.join(" and ") : "updated the AI keys",
+        actor: d.via === "cli" ? "The server CLI" : undefined,
+      };
+    }
+    case "intelligence.clear":
+      return {
+        icon: "ai",
+        verb: "removed all AI keys",
+        actor: d.via === "cli" ? "The server CLI" : undefined,
+      };
+    case "intelligence.read":
+      return {
+        icon: "ai",
+        verb: "fetched the AI keys",
+        actor: str(d.email) ?? "A person",
+      };
     case "pairing_code.revoke":
       return { icon: "pairing", verb: "revoked a pairing code" };
     default:

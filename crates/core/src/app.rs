@@ -28,13 +28,14 @@ pub const PAIR_PATH: &str = "/v1/auth/pair";
 /// The admin login route (rate limited with its own per-IP bucket).
 pub const ADMIN_LOGIN_PATH: &str = "/admin/api/login";
 
-/// Core `/v1` routes (auth, pairing, devices, sync, info). Paths are relative to `/v1`.
+/// Core `/v1` routes (auth, pairing, devices, sync, intelligence, info). Paths are relative to `/v1`.
 pub fn router() -> Router<SharedState> {
     Router::new()
         .route("/info", get(info))
         .merge(crate::auth::routes())
         .merge(crate::pairing::routes())
         .merge(crate::sync::routes())
+        .merge(crate::intelligence::routes())
 }
 
 /// The complete HTTP app for the canvas/core test suites: `/healthz` + `/v1/*` (core routes
