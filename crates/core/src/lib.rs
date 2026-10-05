@@ -14,6 +14,7 @@ pub mod error;
 pub mod events;
 pub mod extract;
 pub mod ids;
+pub mod intelligence;
 pub mod link;
 pub mod observe;
 pub mod pairing;

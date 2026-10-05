@@ -7,6 +7,7 @@ import {
   LayoutGridIcon,
   LogOutIcon,
   SettingsIcon,
+  SparklesIcon,
   UsersIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -29,6 +30,7 @@ const NAV = [
   { href: "/people/", label: "People", icon: UsersIcon },
   { href: "/devices/", label: "Devices", icon: LaptopIcon },
   { href: "/canvases/", label: "Canvases", icon: FrameIcon },
+  { href: "/intelligence/", label: "AI keys", icon: SparklesIcon },
   { href: "/settings/", label: "Settings", icon: SettingsIcon },
 ] as const;
 

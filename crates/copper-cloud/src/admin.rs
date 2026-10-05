@@ -12,7 +12,9 @@ use copper_cloud_core::db;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::cli::AdminCommand;
+use copper_cloud_core::intelligence;
+
+use crate::cli::{AdminCommand, IntelligenceCommand};
 
 pub async fn run(cfg: Config, cmd: AdminCommand) -> anyhow::Result<()> {
     let pool = db::connect(&cfg).await?;
@@ -271,4 +273,160 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line)?;
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
+}
+
+// ---------------------------------------------------------------------------------------------
+// `copper-cloud intelligence …`
+
+/// Read a key from `path` (`-` = stdin). The value is validated, never printed.
+fn read_key_file(path: &std::path::Path, what: &str) -> anyhow::Result<String> {
+    let raw = if path.as_os_str() == "-" {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut s)
+            .with_context(|| format!("reading the {what} from stdin"))?;
+        s
+    } else {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("reading the {what} from {}", path.display()))?
+    };
+    let raw = zeroize::Zeroizing::new(raw);
+    intelligence::clean_key(&raw, what).map_err(api)
+}
+
+fn print_intelligence(s: &intelligence::Settings) {
+    let masked = |last4: String| {
+        if last4.is_empty() {
+            "set (too short to show any characters)".to_owned()
+        } else {
+            format!("…{last4}")
+        }
+    };
+    println!(
+        "sharing:  {}",
+        if s.enabled {
+            "on (signed-in Coppers receive the keys)"
+        } else {
+            "off (GET /v1/intelligence answers with nulls)"
+        }
+    );
+    match &s.jev {
+        Some(j) => println!(
+            "jev:      key {}  endpoint {}  model {}",
+            masked(intelligence::last4(&j.key)),
+            j.endpoint,
+            j.model
+        ),
+        None => println!("jev:      not set"),
+    }
+    match &s.router {
+        Some(r) => println!(
+            "router:   key {}  url {}",
+            masked(intelligence::last4(&r.key)),
+            r.url
+        ),
+        None => println!("router:   not set"),
+    }
+    if let Some(at) = s.updated_at {
+        println!(
+            "updated:  {} by {}",
+            fmt_time(at),
+            s.updated_by.as_deref().unwrap_or("-")
+        );
+    }
+}
+
+pub async fn intelligence(cfg: Config, cmd: IntelligenceCommand) -> anyhow::Result<()> {
+    use intelligence::{Change, JevInput, RouterInput, Update};
+
+    // Read key files before touching the database (fail fast, stdin read once).
+    let update = match &cmd {
+        IntelligenceCommand::Set(a) => {
+            let stdin_users = [&a.jev_key_file, &a.router_key_file]
+                .iter()
+                .filter(|p| p.as_deref().is_some_and(|p| p.as_os_str() == "-"))
+                .count();
+            if stdin_users > 1 {
+                bail!("only one of --jev-key-file / --router-key-file can be \"-\" (stdin)");
+            }
+            let jev_key = a
+                .jev_key_file
+                .as_deref()
+                .map(|p| read_key_file(p, "jev key"))
+                .transpose()?;
+            let router_key = a
+                .router_key_file
+                .as_deref()
+                .map(|p| read_key_file(p, "router key"))
+                .transpose()?;
+            let jev = if jev_key.is_some() || a.jev_endpoint.is_some() || a.jev_model.is_some() {
+                Change::Set(JevInput {
+                    key: jev_key,
+                    endpoint: a.jev_endpoint.clone(),
+                    model: a.jev_model.clone(),
+                })
+            } else {
+                Change::Keep
+            };
+            let router = if router_key.is_some() || a.router_url.is_some() {
+                Change::Set(RouterInput {
+                    key: router_key,
+                    url: a.router_url.clone(),
+                })
+            } else {
+                Change::Keep
+            };
+            let u = Update {
+                jev,
+                router,
+                enabled: None,
+            };
+            if u.is_noop() {
+                bail!("nothing to set: pass --jev-key-file and/or --router-key-file (or a URL/model to change)");
+            }
+            Some(u)
+        }
+        IntelligenceCommand::Clear { jev, router } if *jev || *router => Some(Update {
+            jev: if *jev { Change::Clear } else { Change::Keep },
+            router: if *router { Change::Clear } else { Change::Keep },
+            enabled: None,
+        }),
+        IntelligenceCommand::Enable => Some(Update {
+            enabled: Some(true),
+            ..Update::default()
+        }),
+        IntelligenceCommand::Disable => Some(Update {
+            enabled: Some(false),
+            ..Update::default()
+        }),
+        IntelligenceCommand::Show | IntelligenceCommand::Clear { .. } => None,
+    };
+
+    let pool = db::connect(&cfg).await?;
+    let crypto = Crypto::from_master_key(&cfg.master_key);
+    let actor = intelligence::Actor::Cli;
+    let result = async {
+        let settings = match (&cmd, update) {
+            (_, Some(u)) => intelligence::apply(&pool, &crypto, &actor, &u)
+                .await
+                .map_err(api)?,
+            (IntelligenceCommand::Clear { .. }, None) => {
+                let removed = intelligence::clear(&pool, &actor).await.map_err(api)?;
+                println!(
+                    "{}",
+                    if removed {
+                        "cleared"
+                    } else {
+                        "nothing was set"
+                    }
+                );
+                intelligence::load(&pool, &crypto).await.map_err(api)?
+            }
+            _ => intelligence::load(&pool, &crypto).await.map_err(api)?,
+        };
+        print_intelligence(&settings);
+        anyhow::Ok(())
+    }
+    .await;
+    pool.close().await;
+    result
 }

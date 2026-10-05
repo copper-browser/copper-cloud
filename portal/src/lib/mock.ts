@@ -13,6 +13,7 @@ import type {
   Canvas,
   CreatedAccessKey,
   Device,
+  IntelligenceSettings,
   Overview,
   Page,
   PairingCode,
@@ -352,6 +353,21 @@ const settings: Omit<Settings, "instance_link_code"> = {
   allow_signup: false,
 };
 
+const INTEL_DEFAULTS = {
+  jev_endpoint: "https://api.typesafe.ai/v1/systemone",
+  jev_model: "jev-latest",
+  router_url: "https://llm.example.com",
+};
+const intelligence: IntelligenceSettings = {
+  enabled: true,
+  jev: { key_last4: "x7Qa", endpoint: INTEL_DEFAULTS.jev_endpoint, model: "jev-latest" },
+  router: null,
+  updated_at: ago(2 * DAY),
+  updated_by: "cli",
+  defaults: INTEL_DEFAULTS,
+};
+const last4 = (k: string) => (k.length < 12 ? "" : k.slice(-4));
+
 let auditSeq = 0;
 const audit: AuditEntry[] = [];
 function record(
@@ -613,6 +629,53 @@ function route(
       record("settings.update", "settings", changed, nowIso);
     }
     return currentSettings();
+  }
+
+  if (path === "intelligence") {
+    if (method === "DELETE") {
+      intelligence.jev = null;
+      intelligence.router = null;
+      intelligence.enabled = true;
+      intelligence.updated_at = null;
+      intelligence.updated_by = null;
+      record("intelligence.clear", "intelligence", { via: "admin_api" }, nowIso);
+    } else if (method === "PUT") {
+      const changed: Record<string, unknown> = { via: "admin_api" };
+      if (body.jev === null) {
+        intelligence.jev = null;
+        changed.jev = null;
+      } else if (body.jev) {
+        const j = body.jev as { key?: string; endpoint?: string; model?: string };
+        if (!j.key && !intelligence.jev) throw bad("jev key is required");
+        intelligence.jev = {
+          key_last4: j.key ? last4(j.key) : intelligence.jev!.key_last4,
+          endpoint:
+            j.endpoint || intelligence.jev?.endpoint || INTEL_DEFAULTS.jev_endpoint,
+          model: j.model || intelligence.jev?.model || INTEL_DEFAULTS.jev_model,
+        };
+        changed.jev = { ...intelligence.jev };
+      }
+      if (body.router === null) {
+        intelligence.router = null;
+        changed.router = null;
+      } else if (body.router) {
+        const r = body.router as { key?: string; url?: string };
+        if (!r.key && !intelligence.router) throw bad("router key is required");
+        intelligence.router = {
+          key_last4: r.key ? last4(r.key) : intelligence.router!.key_last4,
+          url: r.url || intelligence.router?.url || INTEL_DEFAULTS.router_url,
+        };
+        changed.router = { ...intelligence.router };
+      }
+      if (typeof body.enabled === "boolean") {
+        intelligence.enabled = body.enabled;
+        changed.enabled = body.enabled;
+      }
+      intelligence.updated_at = nowIso;
+      intelligence.updated_by = admin.email;
+      record("intelligence.update", "intelligence", changed, nowIso);
+    }
+    return { ...intelligence };
   }
 
   if (seg[0] === "access-keys") {

@@ -20,6 +20,8 @@ import type {
   Device,
   DeviceQuery,
   DevicesDeleted,
+  IntelligenceSettings,
+  IntelligenceUpdate,
   LoginResponse,
   Me,
   Ok,
@@ -74,7 +76,7 @@ export function errorMessage(error: unknown): string {
 type Query = Record<string, string | number | boolean | null | undefined>;
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   query?: Query;
   signal?: AbortSignal;
@@ -223,6 +225,15 @@ export const api = {
   settings: (signal?: AbortSignal) => request<Settings>("settings", { signal }),
   updateSettings: (patch: SettingsPatch) =>
     request<Settings>("settings", { method: "PATCH", body: patch }),
+
+  // Intelligence (cloud-wide AI keys; the API only ever returns their last 4 chars)
+  intelligence: {
+    get: (signal?: AbortSignal) =>
+      request<IntelligenceSettings>("intelligence", { signal }),
+    update: (input: IntelligenceUpdate) =>
+      request<IntelligenceSettings>("intelligence", { method: "PUT", body: input }),
+    clear: () => request<IntelligenceSettings>("intelligence", { method: "DELETE" }),
+  },
 
   // Access keys
   accessKeys: {

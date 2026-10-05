@@ -5,7 +5,7 @@
 │ Settings › Cloud  (link, account)      │ ───────────────▶ │ axum on :443 (rustls: self-signed | ACME | off)  │
 │ Sync engine: PUT docs, POST history,   │  X-Copper-       │  observe (span + metrics) → instance gate →      │
 │   SSE /v1/sync/events → pull           │  Instance +      │  auth rate limit → routes                        │
-│ Canvas host: WebSocket relay           │  Bearer token    │   /v1/auth /v1/devices /v1/sync   (core crate)   │
+│ Canvas host: WebSocket relay           │  Bearer token    │   /v1/auth /v1/devices /v1/sync /v1/intelligence │
 └────────────────────────────────────────┘                  │   /v1/canvases /v1/invites        (canvas crate) │
                                                             │ Postgres (local or RDS)                          │
                                                             │ /metrics on 127.0.0.1:9464, JSON logs → journald │
@@ -17,7 +17,7 @@
 | Crate | Role |
 |---|---|
 | `crates/copper-cloud` (bin + lib) | CLI (clap), `serve` bootstrap, graceful shutdown, `doctor`, `admin`, admin API (`/admin/api`), embedded admin portal (rust-embed of `portal/out`), migrations dir |
-| `crates/core` (`copper-cloud-core`) | config, db pool + embedded migrations, crypto, access mode + access keys + gate, auth extractor + routes, pairing codes, sync docs/history/SSE, events, TLS, link codes, observability, app composition |
+| `crates/core` (`copper-cloud-core`) | config, db pool + embedded migrations, crypto, access mode + access keys + gate, auth extractor + routes, pairing codes, sync docs/history/SSE, cloud-wide intelligence keys, events, TLS, link codes, observability, app composition |
 | `portal/` | Next.js static export (the admin portal), built with bun into `portal/out` before cargo in CI/release |
 | `crates/canvas` (`copper-cloud-canvas`) | canvases REST + Yjs rooms (see [canvas.md](canvas.md)) |
 
@@ -66,6 +66,7 @@ it. The query string is never logged (it can carry `?token=`).
 | `server_settings` | `key` | runtime settings from the admin CLI / portal (`allow_signup`, `access_mode`) |
 | `access_keys` | `id`; `key_sha256` unique | per-person gate credentials: `label`, `email?`, `expires_at?`, `revoked_at?`, `uses`/`max_uses?`, `last_used_at` |
 | `pairing_codes` | `id`; `code_sha256` unique | single-use, 10-min codes: `user_id`, `device_name?`, `used_at`, `used_by_device` |
+| `intelligence_settings` | `id` = 1 (singleton) | cloud-wide AI keys: `data_key_wrapped`, sealed `jev_key_sealed` / `router_key_sealed`, `jev_endpoint`, `jev_model`, `router_url`, `enabled`, `updated_at/by` |
 | `admins` | `id`; `lower(email)` unique | portal admin accounts (Argon2id), `last_login_at` |
 | `admin_sessions` | `id`; `token_sha256` unique | `cc_admin` cookie sessions, fixed 7-day `expires_at` |
 | `admin_audit` | `id` bigserial | every admin mutation: `admin_id`, `action`, `target`, `detail` jsonb, `at` |

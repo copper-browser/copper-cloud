@@ -84,6 +84,39 @@ export interface SettingsPatch {
   allow_signup?: boolean;
 }
 
+// Intelligence (AI) keys ---------------------------------------------------
+
+/** Cloud-wide Jev key as the admin sees it: never the key, only its last 4 characters. */
+export interface JevKeyView {
+  /** `""` when the key is too short to reveal any characters. */
+  key_last4: string;
+  endpoint: string;
+  model: string;
+}
+
+export interface RouterKeyView {
+  key_last4: string;
+  url: string;
+}
+
+export interface IntelligenceSettings {
+  /** Signed-in Coppers receive the keys (GET /v1/intelligence) while true. */
+  enabled: boolean;
+  jev: JevKeyView | null;
+  router: RouterKeyView | null;
+  updated_at: string | null;
+  /** Admin email, or `"cli"` for `copper-cloud intelligence …`. */
+  updated_by: string | null;
+  defaults: { jev_endpoint: string; jev_model: string; router_url: string };
+}
+
+/** `PUT intelligence`: omit a block to keep it, `null` clears it; omit `key` to keep the stored one. */
+export interface IntelligenceUpdate {
+  jev?: { key?: string; endpoint?: string; model?: string } | null;
+  router?: { key?: string; url?: string } | null;
+  enabled?: boolean;
+}
+
 // Access keys -------------------------------------------------------------
 
 export type AccessKeyStatus = "active" | "revoked" | "expired" | "exhausted";
@@ -211,7 +244,10 @@ export type AuditAction =
   | "user.reset_password"
   | "device.delete"
   | "canvas.delete"
-  | "pairing_code.revoke";
+  | "pairing_code.revoke"
+  | "intelligence.update"
+  | "intelligence.clear"
+  | "intelligence.read";
 
 export interface AuditEntry {
   /** Sequence number, not a UUID. */

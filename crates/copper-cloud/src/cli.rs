@@ -64,6 +64,49 @@ pub enum Command {
     /// User, admin-account, access-mode and signup administration.
     #[command(subcommand)]
     Admin(AdminCommand),
+    /// Cloud-wide intelligence keys (Jev + LLM router) every signed-in Copper receives.
+    #[command(subcommand)]
+    Intelligence(IntelligenceCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IntelligenceCommand {
+    /// Set or update the keys. Keys are read from files (or "-" for stdin), never argv.
+    Set(IntelligenceSetArgs),
+    /// Show the settings with keys masked (last 4 characters).
+    Show,
+    /// Remove the stored keys (both by default).
+    Clear {
+        /// Only clear the Jev block.
+        #[arg(long, conflicts_with = "router")]
+        jev: bool,
+        /// Only clear the router block.
+        #[arg(long)]
+        router: bool,
+    },
+    /// Hand the stored keys to Coppers (the default once keys are set).
+    Enable,
+    /// Stop handing out the keys (GET /v1/intelligence answers with nulls) without deleting them.
+    Disable,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct IntelligenceSetArgs {
+    /// File holding the Jev (TypeSafe) key; "-" reads stdin.
+    #[arg(long, value_name = "FILE")]
+    pub jev_key_file: Option<PathBuf>,
+    /// Jev endpoint (default https://api.typesafe.ai/v1/systemone).
+    #[arg(long, value_name = "URL")]
+    pub jev_endpoint: Option<String>,
+    /// Jev model (default jev-latest).
+    #[arg(long, value_name = "MODEL")]
+    pub jev_model: Option<String>,
+    /// File holding the LLM router (LiteLLM) key; "-" reads stdin.
+    #[arg(long, value_name = "FILE")]
+    pub router_key_file: Option<PathBuf>,
+    /// Router base URL (default https://llm.example.com).
+    #[arg(long, value_name = "URL")]
+    pub router_url: Option<String>,
 }
 
 #[derive(Args, Debug, Default)]
@@ -344,6 +387,11 @@ pub fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             runtime()?.block_on(crate::admin::run(cfg, cmd))?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Intelligence(cmd) => {
+            let cfg = load_config(cli.config)?;
+            runtime()?.block_on(crate::admin::intelligence(cfg, cmd))?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -486,5 +534,33 @@ mod tests {
         assert!(
             Cli::try_parse_from(["copper-cloud", "admin", "set-access-mode", "directory"]).is_ok()
         );
+        let cli = Cli::try_parse_from([
+            "copper-cloud",
+            "intelligence",
+            "set",
+            "--jev-key-file",
+            "/tmp/j",
+            "--router-key-file",
+            "-",
+            "--router-url",
+            "https://llm.example.com",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Intelligence(IntelligenceCommand::Set(_)))
+        ));
+        // Keys are never accepted on argv.
+        assert!(
+            Cli::try_parse_from(["copper-cloud", "intelligence", "set", "--jev-key", "x"]).is_err()
+        );
+        assert!(Cli::try_parse_from([
+            "copper-cloud",
+            "intelligence",
+            "clear",
+            "--jev",
+            "--router"
+        ])
+        .is_err());
     }
 }

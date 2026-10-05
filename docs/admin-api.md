@@ -29,7 +29,7 @@ Set-Cookie: cc_admin=<43-char token>; Path=/admin; HttpOnly; Secure; SameSite=St
 
 ### CSRF header (required on every non-GET request)
 
-Every `POST`, `PATCH`, `DELETE` (including `login` and `logout`) must carry:
+Every `POST`, `PUT`, `PATCH`, `DELETE` (including `login` and `logout`) must carry:
 
 ```
 X-Requested-With: copper-cloud-portal
@@ -89,9 +89,10 @@ sorted **newest first**. Response envelope:
 
 ### Audit
 
-Every mutation (login, logout, password, settings, key create/revoke, user update / delete /
-reset-password, device delete, canvas delete, pairing-code revoke) writes an `admin_audit`
-row, readable with `GET audit`.
+Every mutation (login, logout, password, settings, AI keys, key create/revoke, user update /
+delete / reset-password, device delete, canvas delete, pairing-code revoke) writes an
+`admin_audit` row, readable with `GET audit`. Users fetching the AI keys are recorded too
+(`intelligence.read`).
 
 ---
 
@@ -152,7 +153,7 @@ redirect — check the code). `new` shorter than 10 chars → `400`.
 
 ```json
 {
-  "version": "0.3.0 (abc1234)",
+  "version": "0.4.0 (abc1234)",
   "uptime_s": 86400,
   "access_mode": "directory",
   "allow_signup": true,
@@ -202,6 +203,67 @@ redirect — check the code). `new` shorter than 10 chars → `400`.
 ```
 
 Invalid `access_mode` → `400`. The gate picks up a mode change within 5 seconds.
+
+---
+
+## Intelligence (AI keys)
+
+Cloud-wide keys every signed-in Copper receives from `GET /v1/intelligence` (see
+[api.md](api.md#intelligence-keys-)): a **Jev** (TypeSafe) key with its endpoint and model, and
+an **LLM router** (LiteLLM) key with its base URL. Keys are encrypted at rest under the master
+key and are **write-only** here: responses carry only their last four characters.
+
+Settings object (`GET`, `PUT` and `DELETE` responses):
+
+```json
+{
+  "enabled": true,
+  "jev": { "key_last4": "x7Qa", "endpoint": "https://api.typesafe.ai/v1/systemone", "model": "jev-latest" },
+  "router": { "key_last4": "9fZk", "url": "https://llm.example.com" },
+  "updated_at": "2026-10-05T20:45:00Z",
+  "updated_by": "admin@cloud.example.com",
+  "defaults": {
+    "jev_endpoint": "https://api.typesafe.ai/v1/systemone",
+    "jev_model": "jev-latest",
+    "router_url": "https://llm.example.com"
+  }
+}
+```
+
+* `jev` / `router`: `null` when not set. `key_last4` is `""` for keys shorter than 12
+  characters (nothing is revealed).
+* `enabled`: sharing toggle. `false` keeps the keys but `GET /v1/intelligence` answers with
+  nulls. Defaults to `true`.
+* `updated_by`: admin email, or `"cli"` for `copper-cloud intelligence …`; `null` when unset.
+
+### `GET /admin/api/intelligence`
+
+The settings object.
+
+### `PUT /admin/api/intelligence`
+
+```json
+// request — every field optional
+{
+  "jev": { "key": "…", "endpoint": "https://…", "model": "jev-latest" },
+  "router": { "key": "…", "url": "https://…" },
+  "enabled": true
+}
+// 200 → settings object
+```
+
+* A missing block is left unchanged; `"jev": null` / `"router": null` removes that block.
+* Inside a block every field is optional: a missing (or empty) `endpoint` / `model` / `url`
+  keeps the stored value, or takes the default for a new block; a missing `key` keeps the
+  stored key (required when the block is new). So `{"router": {"url": "https://…"}}` moves
+  the gateway without re-entering the key.
+* Keys: 8–4096 printable ASCII characters, no spaces (surrounding whitespace is trimmed).
+  URLs: `http://` or `https://` with a host, ≤ 2048 characters; a trailing `/` is dropped.
+  Model: 1–200 characters. Unknown fields → `400`.
+
+### `DELETE /admin/api/intelligence`
+
+Removes both keys and resets `enabled` to `true`. `200` → the (empty) settings object.
 
 ---
 
@@ -475,6 +537,13 @@ object or `null`. Actions:
 | `device.delete` | device id | `{user_id}` (or `{user_ids:[…]}` when deleted without `?user_id=`) |
 | `canvas.delete` | canvas id | `{name}` |
 | `pairing_code.revoke` | code id | `{user_id}` |
+| `intelligence.update` | `"intelligence"` | changed blocks as `{key_changed, key_last4, endpoint, model}` / `{key_changed, key_last4, url}` (or `null` when removed), `enabled`, and `via` (`"admin_api"` / `"cli"`) |
+| `intelligence.clear` | `"intelligence"` | `{via}` |
+| `intelligence.read` | user id | `{email, device_id, jev, router}` (booleans: which blocks were served) |
+
+`intelligence.*` rows written by the server CLI or by a user's read have `admin_id: null`
+(`detail.via = "cli"` for the CLI). Reads are recorded at most once per user per hour. No
+audit row ever contains key material.
 
 ---
 
