@@ -27,7 +27,9 @@ pub enum Event {
     History { seq: i64 },
     /// Something about a canvas changed (`kind` e.g. `created`, `renamed`, `deleted`,
     /// `invited` (new invite or a re-send reminder), `invite_revoked`, `invite_declined`,
-    /// `member_added`, `member_removed`, `update`).
+    /// `member_added`, `member_removed`, `update`, `mention` (you were @mentioned in the
+    /// canvas chat), `mention_read` (your mentions there were marked read, e.g. on another
+    /// device)).
     Canvas { canvas_id: Uuid, kind: String },
 }
 

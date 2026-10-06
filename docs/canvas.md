@@ -19,10 +19,11 @@ the rest of the [API](api.md). Errors use the common `{"error","message"}` shape
 | `canvas_share_links` | opaque share-link token digest, `role` (`editor`), `created_by`, `uses`; tokens are never persisted in plaintext |
 | `canvas_updates` | append-only Yjs update log: `seq bigserial`, `canvas_id`, `"update"` (sealed) |
 | `canvas_snapshots` | one compacted state per canvas: `seq` (last update folded in), `state` (sealed) |
+| `canvas_mentions` | chat @mentions: `canvas_id`, `message_id` (the client's chat message id), `from_user`, `to_user`, `excerpt_sealed`, `created_at`, `read_at`; one row per `(canvas_id, message_id, to_user)` |
 
 Migrations: `crates/copper-cloud/migrations/0100_canvases.sql`,
-`0101_canvas_share_links.sql` and `0102_canvas_invite_nudge.sql` (the canvas crate owns
-`0100`–`0199`).
+`0101_canvas_share_links.sql`, `0102_canvas_invite_nudge.sql` and `0103_canvas_mentions.sql`
+(the canvas crate owns `0100`–`0199`).
 
 - **Personal canvas**: every user has exactly one (`kind = personal`, name `Personal`),
   created on first use (`GET /canvases`, or any `/canvases/personal/...` route) — a unique
@@ -184,7 +185,9 @@ vector is missing is returned. Apply with `Y.applyUpdate(doc, bytes)`.
 ### `GET /canvases/{id}/read[?full=true&ids=a,b&types=sticky,text]`
 
 The agent-friendly read format (see [canvas-protocol.md](canvas-protocol.md#read)), identical
-to the page's `copperCanvas.read`. Text is cut to 500 characters unless `full=true`.
+to the page's `copperCanvas.read`. Text is cut to 500 characters unless `full=true`. Since
+0.6.0 it also carries `chat`: the last 50 messages of the canvas chat, oldest first (see
+[Chat and mentions](#chat-and-mentions)); `ids` / `types` narrow the shapes, not the chat.
 
 ### `GET /people`
 
@@ -217,6 +220,79 @@ op `i`, `null` when it failed). Lets remote agents draw without a client.
   (`ops` not an array, bad `as`, too many ops) are reported like the page does: `200` with
   `errors: [{"index": -1, …}]`. Malformed JSON is `400`.
 
+### Chat and mentions
+
+Shared canvases have a chat (0.6.0). The messages live **in the canvas document** — a
+top-level `Y.Array` named `chat` of plain objects
+`{id, authorId, authorName, text, mentions: [userId], at, editedAt?, deleted?}` (see
+[canvas-protocol.md](canvas-protocol.md#document-schema)) — written by Copper and synced,
+persisted, compacted and reloaded by the room like every other part of the document. The
+server never writes it; `GET /canvases/{id}/read` shows the most recent 50. What the server
+adds is **mention notifications**: after Copper inserts a message that @mentions people, it
+reports them, and the server records one row per recipient and tells them.
+
+#### `POST /canvases/{id}/mentions {message_id, user_ids, excerpt}` → `200`
+
+```json
+{ "message_id": "msg_01J…", "user_ids": ["0192…ben", "0192…cy"], "excerpt": "@Ben @Cy dinner Tuesday?" }
+```
+
+Any member. `user_ids` is filtered to **current members of the canvas other than the
+caller**; each such recipient gets a stored mention and a `canvas` event with kind `mention`.
+Idempotent per `(canvas, message_id, recipient)`: repeating the call (a retry) answers the
+same and notifies nobody again; the first excerpt wins.
+
+```json
+{ "notified": ["0192…ben", "0192…cy"], "skipped": ["0192…left-the-canvas"] }
+```
+
+- `notified`: the requested users that are mentioned by this message (members other than you),
+  including on a retry; `skipped`: everyone else (yourself, non-members, unknown ids), in
+  request order, duplicates removed.
+- `message_id`: 1–128 characters, no control characters (`400`). `user_ids`: UUIDs, at most
+  100 (`400`); may be empty. `excerpt`: optional; control characters and runs of whitespace
+  become one space, then it is cut to 200 characters. It is sealed at rest under the canvas
+  doc key.
+- Non-members and unknown canvases: `404` (as everywhere). The Personal canvas has no chat:
+  `400`. More than 60 calls per minute per user (bursts of 60, then one per second): `429
+  {"error":"rate_limited"}`.
+
+#### `GET /mentions[?unread=1&limit=n]`
+
+Your mentions on canvases you are still a member of, newest first. `unread=1` (or `true`)
+returns only unread ones; `limit` defaults to 50 and is capped at 100 (`< 1` is `400`).
+`unread` (in the body) counts every unread mention you can see, regardless of `limit`.
+
+```json
+{
+  "mentions": [
+    {
+      "id": "0192…",
+      "canvas": { "id": "0192…", "name": "Team dinners" },
+      "from": { "id": "0192…", "display_name": "Ann", "email": "ann@example.com" },
+      "message_id": "msg_01J…",
+      "excerpt": "@Ben @Cy dinner Tuesday?",
+      "created_at": "2026-10-06T18:00:00Z",
+      "read_at": null
+    }
+  ],
+  "unread": 1
+}
+```
+
+Leaving a canvas hides its mentions (they come back if you rejoin); deleting a canvas or
+either account deletes them.
+
+#### `POST /mentions/read {ids} | {canvas_id}` → `{"ok": true, "updated": n}`
+
+Marks your own unread mentions read — by mention `id` (at most 500) and/or every mention on
+`canvas_id`. Others' mentions and canvases you are not a member of are silently untouched
+(`updated` counts what changed). For each canvas where something changed you get a `canvas`
+event with kind `mention_read`, so your other devices clear their badges. Neither key → `400`.
+
+Clients gate this on `GET /v1/info` `version >= 0.6.0`; on older servers the chat still works
+(it is part of the document) but there are no mention notifications.
+
 ### `GET /canvases/{id}/ws` — live room
 
 WebSocket upgrade (HTTP/1.1 `GET`, or HTTP/2 extended `CONNECT`). Auth: the `Authorization`
@@ -244,6 +320,8 @@ Members get `event: canvas` on `GET /v1/sync/events`
 | `member_added` | members | invite accepted |
 | `member_removed` | members + the removed user | member removed / left |
 | `update` | members | document changed (at most once per 2 s per canvas, plus one trailing) |
+| `mention` | each newly mentioned member | someone @mentioned you in the canvas chat (0.6.0) |
+| `mention_read` | you | your mentions on that canvas were marked read (e.g. on another device) (0.6.0) |
 
 ## Rooms
 
@@ -281,6 +359,7 @@ awareness table, and one `tokio::sync::broadcast` channel (256 frames) fanned ou
 | Canvas name | 200 characters |
 | Awareness clients per socket | 16 |
 | Sticky/text body | 20 000 characters; titles/labels cut to 500 |
+| Mentions | 100 `user_ids` per call; excerpt cut to 200 characters; `message_id` ≤ 128; 60 calls per minute per user; `GET /mentions` ≤ 100; `POST /mentions/read` ≤ 500 ids |
 
 ### Metrics
 
@@ -292,6 +371,8 @@ awareness table, and one `tokio::sync::broadcast` channel (256 frames) fanned ou
 | `canvas_update_bytes_total` | counter | plaintext bytes of those updates |
 | `canvas_compactions_total` | counter | snapshot compactions |
 | `canvas_ws_bytes_in_total` / `canvas_ws_bytes_out_total` | counter | WebSocket payload bytes |
+| `canvas_mentions_total` | counter | chat mentions stored (new recipients notified) |
+| `canvas_mentions_rate_limited_total` | counter | `POST /canvases/{id}/mentions` calls refused with `429` |
 
 `copper_cloud_canvas::rooms_metrics()` returns the live `{rooms, peers}` counts.
 
@@ -314,7 +395,10 @@ and CSP `default-src 'none'; style-src 'unsafe-inline'`.
   derived from `master_key` (`canvases.doc_key_wrapped`). Every update and snapshot is
   AES-256-GCM `nonce(12) || ciphertext || tag` under that key with AAD = the canvas id's 16
   raw bytes, so rows copied to another canvas fail to decrypt. Key rotation is out of scope
-  (see [security.md](security.md)).
+  (see [security.md](security.md)). Chat lives in the document, so it is sealed the same way;
+  mention excerpts are sealed under the same doc key with AAD
+  `"copper-cloud/v1/mention:" ‖ the mention id's 16 raw bytes`. Mention ids, message ids,
+  sender/recipient and timestamps are not encrypted.
 - **Invite tokens**: a random secret is generated per invite but only its SHA-256 is stored
   (reserved for future shareable links); v1 is email-invite only and never returns it.
 - **Logging**: canvas and user ids, op counts and error kinds only — never tokens, document
@@ -327,9 +411,11 @@ and CSP `default-src 'none'; style-src 'unsafe-inline'`.
 
 `cargo test -p copper-cloud-canvas` runs unit tests plus integration tests against the
 native Postgres database `copper_cloud_test_canvas` (`postgres://localhost:5432/…`, current
-OS user): REST lifecycle, Personal canvas, invites (re-send reminders, revocation), 404
-scoping, two-client sync + awareness,
-persistence across eviction, compaction, ops fan-out, revocation.
+OS user; override with `COPPER_CLOUD_TEST_CANVAS_DATABASE_URL`): REST lifecycle, Personal
+canvas, invites (re-send reminders, revocation), 404 scoping, two-client sync + awareness,
+persistence across eviction, compaction, ops fan-out, revocation, the `chat` array across
+eviction / restart / compaction (`tests/chat.rs`), and mentions — member filtering,
+idempotency, read marking, events, sealing, rate limit (`tests/mentions.rs`).
 
 A cross-implementation test drives the real page code (Yjs, `y-websocket`,
 `Canvas/src/ops.ts`) with Bun and checks that the server's `/read` equals the page's

@@ -6,7 +6,7 @@
 │ Sync engine: PUT docs, POST history,   │  X-Copper-       │  observe (span + metrics) → instance gate →      │
 │   SSE /v1/sync/events → pull           │  Instance +      │  auth rate limit → routes                        │
 │ Canvas host: WebSocket relay           │  Bearer token    │   /v1/auth /v1/devices /v1/sync /v1/intelligence │
-└────────────────────────────────────────┘                  │   /v1/canvases /v1/invites        (canvas crate) │
+└────────────────────────────────────────┘                  │   /v1/canvases /v1/invites /v1/mentions (canvas) │
                                                             │ Postgres (local or RDS)                          │
                                                             │ /metrics on 127.0.0.1:9464, JSON logs → journald │
                                                             └──────────────────────────────────────────────────┘

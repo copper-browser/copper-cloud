@@ -173,6 +173,8 @@ KEK ──AES-256-GCM(aad "copper-cloud/v1/wrapped-key")──▶ users.data_key
                                                         intelligence_settings.data_key_wrapped
 data_key ──AES-256-GCM(nonce 12 B random, aad "<user_id>:<domain>")──▶ sync_docs.payload, history.payload
 intelligence data_key ──AES-256-GCM(aad "intelligence:jev" | "intelligence:router")──▶ jev_key_sealed, router_key_sealed
+canvas doc_key ──AES-256-GCM(aad canvas id)──▶ canvas_updates."update", canvas_snapshots.state (incl. chat)
+canvas doc_key ──AES-256-GCM(aad "copper-cloud/v1/mention:" ‖ mention id)──▶ canvas_mentions.excerpt_sealed
 ```
 
 - Sealed blob layout: `nonce(12) ‖ ciphertext ‖ tag(16)`.
@@ -181,7 +183,7 @@ intelligence data_key ──AES-256-GCM(aad "intelligence:jev" | "intelligence:r
 - The master key never leaves the config file / process memory; the derived KEK cipher is held
   in memory, raw key bytes are zeroized after derivation.
 - What is *not* encrypted: emails, display names, device names, timestamps, sizes, versions,
-  domain names, history `visited_at`. These are needed for indexing/ordering.
+  domain names, history `visited_at`, canvas names, chat message ids and who mentioned whom. These are needed for indexing/ordering.
 
 **Back up the master key separately from database backups.** Losing it makes all synced data
 unrecoverable; leaking it together with a DB dump exposes everything.

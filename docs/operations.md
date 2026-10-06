@@ -7,7 +7,7 @@ sudo copper-cloud doctor
 ```
 
 ```
-copper-cloud doctor (0.5.0)
+copper-cloud doctor (0.6.0)
   ok    config      /etc/copper-cloud/copper-cloud.toml
   ok    database    PostgreSQL 16.4 (postgres://copper_cloud:***@127.0.0.1:5432/copper_cloud)
   ok    migrations  7 applied, none pending

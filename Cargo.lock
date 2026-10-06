@@ -621,7 +621,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "copper-cloud"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "copper-cloud-canvas"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -655,6 +655,7 @@ dependencies = [
  "bytes",
  "copper-cloud-core",
  "futures",
+ "governor",
  "http-body-util",
  "metrics",
  "serde",
@@ -672,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "copper-cloud-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

@@ -109,7 +109,7 @@ terraform output -state=state/demo/terraform.tfstate
 ## N instances in parallel
 
 ```bash
-for n in alpha beta gamma; do ./deploy/aws/up.sh "$n" --release v0.5.0 > "/tmp/up-$n.log" 2>&1 & done; wait
+for n in alpha beta gamma; do ./deploy/aws/up.sh "$n" --release v0.6.0 > "/tmp/up-$n.log" 2>&1 & done; wait
 ```
 
 Each name gets its own RDS instance, bucket, IAM role, SGs, EIP and SSM path. Check the account

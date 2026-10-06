@@ -62,6 +62,7 @@ is limited to `limits.auth_per_minute` (default 10) requests per minute per clie
 per /64), GCRA (bursts of 10, then one every 6 s). This includes the ungated
 `POST /v1/auth/pair`. Admin login has its own bucket of the same size.
 Behind a proxy set `trust_proxy = true` so the right-most `X-Forwarded-For` hop is used.
+`POST /v1/canvases/{id}/mentions` has its own per-user bucket (60 per minute, bursts of 60).
 
 ### Request size limits
 
@@ -88,7 +89,7 @@ Key only (no session). Lets a client validate a link code before showing account
 ```json
 {
   "name": "copper-cloud",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "signup": true,
   "access_mode": "directory",
   "limits": { "max_blob_bytes": 8000000, "max_history_batch": 2000, "max_history_entry_bytes": 16384 }
@@ -420,7 +421,9 @@ data: {"skipped":12}
   (`GET /v1/sync/docs` + history from your cursor).
 - A `: keepalive` comment every 15 s. The stream ends on server shutdown, when the session is
   revoked (checked every 5 min), or on network loss — reconnect with backoff and re-pull.
-- Events carry no payloads; fetch the doc/history after an event.
+- Events carry no payloads; fetch the doc/history after an event. `canvas` kinds are listed in
+  [canvas.md](canvas.md#change-notifications) (0.6.0 adds `mention` and `mention_read`: refetch
+  `GET /v1/mentions`).
 
 ---
 
@@ -475,7 +478,8 @@ Mounted under the same `/v1` gate and session auth; documented in
 `GET /v1/canvas-links/{token}`, `POST /v1/canvas-links/{token}/join`,
 `GET /v1/people`, `GET /v1/canvases/{id}/ws`
 (WebSocket, Yjs sync protocol), `GET /v1/canvases/{id}/state`, `GET /v1/canvases/{id}/read`,
-`POST /v1/canvases/{id}/ops`.
+`POST /v1/canvases/{id}/ops`, and chat mentions (0.6.0): `POST /v1/canvases/{id}/mentions`,
+`GET /v1/mentions`, `POST /v1/mentions/read` ([canvas.md](canvas.md#chat-and-mentions)).
 
 ### People
 

@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 or from a release tarball:
 
 ```sh
-tar xzf copper-cloud-0.5.0-linux-x86_64.tar.gz && sudo ./install.sh
+tar xzf copper-cloud-0.6.0-linux-x86_64.tar.gz && sudo ./install.sh
 ```
 
 The installer sets up Postgres (unless you pass `DATABASE_URL`), a `copper-cloud` system user,
@@ -105,7 +105,7 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
   encryption at rest, TLS pinning
 - [Install](docs/install.md) — VM one-liner, manual install, configuration reference
 - [Operations](docs/operations.md) — doctor, logs, metrics, backups, upgrades
-- [v0.5.0 release notes](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
+- [v0.6.0 release notes](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
 
 ## Development
 
@@ -117,7 +117,9 @@ cargo test --workspace
 ```
 
 Tests use a real native Postgres (`COPPER_CLOUD_TEST_DATABASE_URL`, default
-`postgres://localhost:5432/copper_cloud_test_core`); never a container. Releases: push a
+`postgres://localhost:5432/copper_cloud_test_core`; the canvas crate's tests use
+`COPPER_CLOUD_TEST_CANVAS_DATABASE_URL`, default `…/copper_cloud_test_canvas`); never a
+container. Releases: push a
 `vX.Y.Z` tag matching the crate version; CI builds `copper-cloud-X.Y.Z-linux-{x86_64,aarch64}.tar.gz`
 (+ `.sha256`) and publishes the GitHub release.
 
