@@ -44,7 +44,7 @@ Always `{"error": "<code>", "message": "<text>"}`:
 
 | Status | `error` | When |
 |---|---|---|
-| 400 | `bad_request` | invalid JSON, field, domain, size of one entry, … |
+| 400 | `bad_request` | invalid JSON, field, domain, too many history entries, … |
 | 401 | `instance_key` / `session` / `credentials` / `account_disabled` / `pairing_code` | see above |
 | 403 | `forbidden` | signup disabled; writing another device's `tabs:` doc |
 | 403 | `access_key_required` / `access_key_email` / `access_key_exhausted` | signup in `directory` mode without an access key; key bound to another email; key's `max_uses` reached |
@@ -88,7 +88,7 @@ Key only (no session). Lets a client validate a link code before showing account
 ```json
 {
   "name": "copper-cloud",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "signup": true,
   "access_mode": "directory",
   "limits": { "max_blob_bytes": 8000000, "max_history_batch": 2000, "max_history_entry_bytes": 16384 }
@@ -339,12 +339,34 @@ Append-only. Each entry is a client-defined JSON object (e.g. `url`, `title`, `v
 { "entries": [ { "url": "https://example.com", "title": "Example", "visited_at": "2026-10-01T12:00:00Z" } ] }
 ```
 
-- ≤ `max_history_batch` (2000) entries, each a JSON object ≤ `max_history_entry_bytes`
-  (16 KiB) → else `400`.
+- Each entry: a JSON object of at most `max_history_entry_bytes` (16 KiB, as serialized in
+  the request).
 - `visited_at`: RFC 3339 string, or Unix seconds (numbers > 1e11 are read as milliseconds);
   missing → now. Indexed for ordering/retention only.
-- `200 {"seq": 1240, "inserted": 3}` — `seq` is the highest sequence number assigned. An SSE
-  `history` event follows. Empty `entries` → `{"seq": <current max>, "inserted": 0}`.
+- `200 {"seq": 1240, "inserted": 3, "rejected": []}` — `seq` is the highest sequence number
+  assigned. An SSE `history` event follows when anything was inserted. Empty `entries` (or
+  nothing valid) → `seq` is the current max and `inserted` is `0`.
+- **A bad entry never fails the batch** (since 0.5.0). It is skipped, the valid entries are
+  stored, and the response lists what was skipped, by position in `entries`:
+
+  ```json
+  { "seq": 1240, "inserted": 2,
+    "rejected": [ { "index": 1, "reason": "too_large", "message": "entry is 20480 bytes; the limit is 16384" } ] }
+  ```
+
+  | `reason` | Entry problem |
+  |---|---|
+  | `too_large` | over `max_history_entry_bytes` |
+  | `not_object` | not a JSON object |
+  | `invalid` | an object serde cannot read (e.g. a duplicate `visited_at`) |
+  | `bad_visited_at` | `visited_at` neither RFC 3339 nor a Unix timestamp |
+
+  Skipped entries are not stored; a client should treat the batch as sent and move on (a
+  client that resends the same batch after a failure therefore never wedges on one entry).
+  Invalid UTF-8 inside an entry is replaced with U+FFFD rather than failing the request.
+- Whole-request problems stay errors, with a message saying which: `400` for a body that is
+  not JSON, not an object with an `entries` array, or has more than `max_history_batch`
+  (2000) entries; `413` for a body over the cap above.
 
 ### `GET /v1/sync/history?since=<seq>&limit=<n>&exclude_device=me`
 
@@ -447,7 +469,8 @@ Mounted under the same `/v1` gate and session auth; documented in
 
 `GET/POST /v1/canvases`, `GET/PATCH/DELETE /v1/canvases/{id}`, `GET /v1/canvases/{id}/members`,
 `DELETE /v1/canvases/{id}/members/{user_id}`, `GET/POST /v1/canvases/{id}/invites`,
-`GET /v1/invites`, `POST /v1/invites/{id}/accept|decline`,
+`DELETE /v1/canvases/{id}/invites/{invite_id}`, `GET /v1/invites`,
+`POST /v1/invites/{id}/accept|decline`,
 `POST/GET/DELETE /v1/canvases/{id}/links` (and `DELETE .../links/{link_id}`),
 `GET /v1/canvas-links/{token}`, `POST /v1/canvas-links/{token}/join`,
 `GET /v1/people`, `GET /v1/canvases/{id}/ws`

@@ -199,7 +199,9 @@ it and minting a new one in the portal.
 ### Logging
 
 Request spans record method, path (never the query string), matched route, client IP,
-`user_id`, status and latency. Never logged: tokens, passwords, instance/master keys, access
+`user_id`, status and latency, plus the error code of an error response and — for `400`s — the
+client-facing message with every double-quoted fragment (where serde echoes input values)
+replaced by `"…"`. Never logged: tokens, passwords, instance/master keys, access
 keys, intelligence (Jev / router) keys, pairing codes, admin cookies, request or response bodies, payloads (access keys and
 pairing codes are logged by id only). `Config`'s `Debug` redacts keys and the database password.
 500s log the internal error chain server-side only; clients get `{"error":"internal"}`.

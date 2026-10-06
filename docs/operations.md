@@ -7,7 +7,7 @@ sudo copper-cloud doctor
 ```
 
 ```
-copper-cloud doctor (0.4.0)
+copper-cloud doctor (0.5.0)
   ok    config      /etc/copper-cloud/copper-cloud.toml
   ok    database    PostgreSQL 16.4 (postgres://copper_cloud:***@127.0.0.1:5432/copper_cloud)
   ok    migrations  7 applied, none pending
@@ -48,10 +48,25 @@ JSON lines on stdout → journald. One `request` line per HTTP request:
          "user_id":"0192…","status":200,"latency_ms":3.1,"name":"request"}}
 ```
 
-5xx are logged at `error` with the internal error chain. Useful filters:
+Error responses add `span.error` (the machine-readable code the client got, e.g.
+`bad_request`, `not_found`, `payload_too_large`) and, for `400`s, `span.error_message` — the
+message the client got, capped at 200 characters, with any double-quoted input value replaced
+by `"…"`:
+
+```json
+"span":{"method":"POST","path":"/v1/sync/history","route":"/v1/sync/history","user_id":"0192…",
+        "status":400,"error":"bad_request",
+        "error_message":"too many entries: 2400 in one request; at most 2000 (see GET /v1/info limits)", …}
+```
+
+5xx are logged at `error` with the internal error chain. Skipped history entries (see
+`POST /v1/sync/history`) log one `history entries skipped` warning per request with the count
+and the first index/reason. Useful filters:
 
 ```sh
 journalctl -u copper-cloud -o cat | jq -c 'select(.level=="ERROR")'
+journalctl -u copper-cloud -o cat | jq -c 'select(.span.status==400) | .span | {path, user_id, error_message}'
+journalctl -u copper-cloud -o cat | jq -c 'select(.message=="history entries skipped")'
 journalctl -u copper-cloud -o cat | jq -c 'select(.span.status==429)'
 journalctl -u copper-cloud -o cat | jq -c 'select(.message=="login failed")'
 ```
@@ -74,6 +89,7 @@ curl -s http://127.0.0.1:9464/metrics
 | `http_request_duration_seconds` | histogram | `route` |
 | `sync_doc_bytes` | histogram | — (plaintext size of accepted doc writes) |
 | `history_rows` | counter | — (entries appended) |
+| `history_rejected` | counter | — (entries skipped as invalid; the rest of their batch is stored) |
 | `sse_subscribers` | gauge | — (open event streams) |
 | `auth_rate_limited_total` | counter | — |
 | `db_pool_size`, `db_pool_idle` | gauge | — (refreshed on scrape) |

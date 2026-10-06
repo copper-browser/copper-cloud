@@ -308,6 +308,47 @@ struct EntryProbe {
     visited_at: Option<serde_json::Value>,
 }
 
+/// One history entry the server skipped; the rest of its batch is stored.
+#[derive(Debug, Serialize)]
+struct RejectedEntry {
+    /// Position in the request's `entries`.
+    index: usize,
+    /// `too_large` | `not_object` | `invalid` | `bad_visited_at`.
+    reason: &'static str,
+    message: String,
+}
+
+/// Validates one entry and returns its `visited_at`, or why it is skipped.
+fn check_history_entry(
+    index: usize,
+    text: &str,
+    max_bytes: usize,
+    now: OffsetDateTime,
+) -> Result<OffsetDateTime, RejectedEntry> {
+    let reject = |reason, message: String| RejectedEntry {
+        index,
+        reason,
+        message,
+    };
+    if text.len() > max_bytes {
+        return Err(reject(
+            "too_large",
+            format!("entry is {} bytes; the limit is {max_bytes}", text.len()),
+        ));
+    }
+    if !text.starts_with('{') {
+        return Err(reject("not_object", "entry must be a JSON object".into()));
+    }
+    let probe: EntryProbe =
+        serde_json::from_str(text).map_err(|e| reject("invalid", format!("entry: {e}")))?;
+    parse_visited_at(probe.visited_at.as_ref(), now).map_err(|_| {
+        reject(
+            "bad_visited_at",
+            "visited_at must be RFC 3339 or a Unix timestamp".into(),
+        )
+    })
+}
+
 /// `visited_at` may be RFC 3339 or a Unix timestamp (seconds, or milliseconds when > 1e11).
 fn parse_visited_at(
     v: Option<&serde_json::Value>,
@@ -341,6 +382,20 @@ fn history_body_limit(cfg: &crate::config::Limits) -> usize {
     (cfg.max_history_batch * (cfg.max_history_entry_bytes + 8) + 1024).min(64 * 1024 * 1024)
 }
 
+async fn current_history_seq(state: &SharedState, user_id: Uuid) -> ApiResult<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COALESCE(max(seq), 0) FROM history WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await?,
+    )
+}
+
+/// `POST /sync/history`. Only problems with the request as a whole are errors (`400`: not
+/// JSON / no `entries` array / more than `max_history_batch` entries; `413`: body over the
+/// cap). A bad *entry* (too large, not an object, unparsable `visited_at`) is skipped and
+/// listed in `rejected` while the rest of the batch is stored, so a client that resends the
+/// same batch can never wedge on one poison entry.
 async fn push_history(
     State(state): State<SharedState>,
     user: KeyedUser,
@@ -350,47 +405,58 @@ async fn push_history(
     let limit = history_body_limit(limits);
     check_content_length(&req, limit)?;
     let bytes = read_body(req.into_body(), limit).await?;
-    let body: HistoryPush<'_> = serde_json::from_slice(&bytes)
-        .map_err(|e| ApiError::bad_request(format!("invalid JSON body: {e}")))?;
+    // Invalid UTF-8 inside one entry's string would fail the whole parse; repair it to U+FFFD
+    // instead (borrowed, no copy, when the body is valid).
+    let text = String::from_utf8_lossy(&bytes);
+    let body: HistoryPush<'_> = serde_json::from_str(&text).map_err(|e| {
+        ApiError::bad_request(format!(
+            "invalid JSON body: {e}; expected an object with an `entries` array"
+        ))
+    })?;
     if body.entries.len() > limits.max_history_batch {
         return Err(ApiError::bad_request(format!(
-            "at most {} entries per request",
+            "too many entries: {} in one request; at most {} (see GET /v1/info limits)",
+            body.entries.len(),
             limits.max_history_batch
         )));
     }
     let user_id = user.user.user_id;
-    if body.entries.is_empty() {
-        let seq: i64 =
-            sqlx::query_scalar("SELECT COALESCE(max(seq), 0) FROM history WHERE user_id = $1")
-                .bind(user_id)
-                .fetch_one(&state.db)
-                .await?;
-        return Ok(Json(json!({ "seq": seq, "inserted": 0 })));
-    }
-
     let aad = Crypto::user_aad(user_id, HISTORY_AAD_DOMAIN);
     let now = OffsetDateTime::now_utc();
     let mut visited = Vec::with_capacity(body.entries.len());
     let mut payloads = Vec::with_capacity(body.entries.len());
+    let mut rejected = Vec::new();
     for (i, raw) in body.entries.iter().enumerate() {
         let text = raw.get();
-        if text.len() > limits.max_history_entry_bytes {
-            return Err(ApiError::bad_request(format!(
-                "entry {i} exceeds {} bytes",
-                limits.max_history_entry_bytes
-            )));
+        match check_history_entry(i, text, limits.max_history_entry_bytes, now) {
+            Ok(at) => {
+                visited.push(at);
+                payloads.push(Crypto::seal(&user.data_key, &aad, text.as_bytes()));
+            }
+            Err(r) => rejected.push(r),
         }
-        if !text.starts_with('{') {
-            return Err(ApiError::bad_request(format!(
-                "entry {i} must be a JSON object"
-            )));
-        }
-        let probe: EntryProbe = serde_json::from_str(text)
-            .map_err(|e| ApiError::bad_request(format!("entry {i}: {e}")))?;
-        visited.push(parse_visited_at(probe.visited_at.as_ref(), now)?);
-        payloads.push(Crypto::seal(&user.data_key, &aad, text.as_bytes()));
     }
+    drop(body);
+    drop(text);
     drop(bytes);
+    if let Some(first) = rejected.first() {
+        metrics::counter!("history_rejected")
+            .increment(u64::try_from(rejected.len()).unwrap_or(u64::MAX));
+        tracing::warn!(
+            rejected = rejected.len(),
+            accepted = payloads.len(),
+            first_index = first.index,
+            first_reason = first.reason,
+            first_message = %crate::error::loggable_message(&first.message),
+            "history entries skipped"
+        );
+    }
+    if payloads.is_empty() {
+        let seq = current_history_seq(&state, user_id).await?;
+        return Ok(Json(
+            json!({ "seq": seq, "inserted": 0, "rejected": rejected }),
+        ));
+    }
 
     let (seq, inserted): (Option<i64>, i64) = sqlx::query_as(
         "WITH ins AS (
@@ -410,7 +476,9 @@ async fn push_history(
     #[allow(clippy::cast_precision_loss)]
     metrics::counter!("history_rows").increment(u64::try_from(inserted).unwrap_or(0));
     state.events.publish(user_id, Event::History { seq });
-    Ok(Json(json!({ "seq": seq, "inserted": inserted })))
+    Ok(Json(
+        json!({ "seq": seq, "inserted": inserted, "rejected": rejected }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -620,6 +688,37 @@ mod tests {
         assert_eq!(parse_visited_at(None, now).unwrap(), now);
         assert!(v(json!("yesterday")).is_err());
         assert!(v(json!([1])).is_err());
+    }
+
+    #[test]
+    fn entry_checks_are_per_entry() {
+        let now = OffsetDateTime::now_utc();
+        let check = |text: &str| check_history_entry(7, text, 64, now);
+        assert_eq!(
+            check(r#"{"url":"u","visited_at":1790856000}"#)
+                .unwrap()
+                .unix_timestamp(),
+            1_790_856_000
+        );
+        assert_eq!(check(r#"{"url":"u"}"#).unwrap(), now);
+        let reason = |text: &str| {
+            let r = check(text).unwrap_err();
+            assert_eq!(r.index, 7);
+            r.reason
+        };
+        assert_eq!(
+            reason(&format!(r#"{{"url":"{}"}}"#, "x".repeat(64))),
+            "too_large"
+        );
+        assert_eq!(reason("[1]"), "not_object");
+        assert_eq!(reason(r#""str""#), "not_object");
+        assert_eq!(
+            reason(r#"{"visited_at":1,"visited_at":2}"#),
+            "invalid",
+            "duplicate field"
+        );
+        assert_eq!(reason(r#"{"visited_at":"soon"}"#), "bad_visited_at");
+        assert_eq!(reason(r#"{"visited_at":1e300}"#), "bad_visited_at");
     }
 
     #[test]

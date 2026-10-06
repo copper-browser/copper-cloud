@@ -27,6 +27,7 @@ async fn open_mode_accepts_instance_key_and_access_keys() {
     assert_eq!(r.status(), 200);
     let info: Value = r.json().await.unwrap();
     assert_eq!(info["access_mode"], "open", "no row → open");
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
 
     let (_, key) = s.mint_key("Ana", None, None).await;
     assert_eq!(status_of(&s, "/v1/info", &key).await, 200);
