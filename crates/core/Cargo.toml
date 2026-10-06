@@ -45,3 +45,6 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 governor.workspace = true
 
+
+[dev-dependencies]
+tower.workspace = true

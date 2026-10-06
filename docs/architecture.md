@@ -37,7 +37,8 @@ Router
 ├── /admin/api = admin_api::router()   (cookie sessions + CSRF header; fallback → 404 JSON)
 └── fallback → portal::serve           (embedded portal/out; /v1x, /metrics… → 404 JSON)
 layers (outermost first):
-  observe::track      span {method, path, route, ip, user_id, status, latency_ms}; http_* metrics
+  observe::track      span {method, path, route, ip, user_id, status, latency_ms,
+                      error, error_message (400s)}; http_* metrics
   instance_gate       /v1 only: X-Copper-Instance = instance key (open mode, constant-time)
                       or access key (SHA-256 lookup) → GateIdentity extension; else 401
                       instance_key. access_mode cached 5 s.

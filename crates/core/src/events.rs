@@ -26,7 +26,8 @@ pub enum Event {
     /// New history rows exist up to and including `seq`.
     History { seq: i64 },
     /// Something about a canvas changed (`kind` e.g. `created`, `renamed`, `deleted`,
-    /// `invited`, `member_added`, `member_removed`).
+    /// `invited` (new invite or a re-send reminder), `invite_revoked`, `invite_declined`,
+    /// `member_added`, `member_removed`, `update`).
     Canvas { canvas_id: Uuid, kind: String },
 }
 

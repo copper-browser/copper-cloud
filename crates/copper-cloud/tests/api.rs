@@ -708,20 +708,28 @@ async fn history_push_pull() {
         .await
         .unwrap();
     assert_eq!(r.status(), 400);
+    // A bad entry is skipped and reported, never a 400 for the batch.
     let r = s
         .authed(Method::POST, "/v1/sync/history", &a)
         .json(&json!({ "entries": ["not an object"] }))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 400);
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["inserted"], 0);
+    assert_eq!(v["seq"], last_seq);
+    assert_eq!(v["rejected"][0]["reason"], "not_object");
     let r = s
         .authed(Method::POST, "/v1/sync/history", &a)
         .json(&json!({ "entries": [{ "url": "x", "visited_at": "last tuesday" }] }))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 400);
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["inserted"], 0);
+    assert_eq!(v["rejected"][0]["reason"], "bad_visited_at");
 
     // Stored encrypted; other users see nothing.
     let stored: Vec<Vec<u8>> = sqlx::query_scalar("SELECT payload FROM history")
@@ -741,6 +749,137 @@ async fn history_push_pull() {
         .await
         .unwrap();
     assert_eq!(page["entries"].as_array().unwrap().len(), 0);
+}
+
+/// A client that resends the same batch after a failure (Copper does) must never wedge on one
+/// poison entry: bad entries are skipped and listed, the rest is stored, the status is 200.
+#[tokio::test]
+async fn history_skips_bad_entries_and_keeps_the_rest() {
+    let s = start_with(|c| {
+        c.limits.max_history_batch = 10;
+        c.limits.max_history_entry_bytes = 1024;
+    })
+    .await;
+    let a = s
+        .signup("poison@example.com", PASSWORD, &new_device())
+        .await;
+    let b = s
+        .login("poison@example.com", PASSWORD, &new_device())
+        .await
+        .json::<Value>()
+        .await
+        .unwrap();
+    let b = common::session_from(&b);
+    let uid: uuid::Uuid = a.user_id.parse().unwrap();
+    let mut events = s.state.events.subscribe(uid);
+    let visit = |i: usize| {
+        json!({
+            "url": format!("https://example.com/{i}"),
+            "title": format!("Page {i}"),
+            "visited_at": "2026-10-06T16:45:29.123Z",
+        })
+    };
+    let batch = json!({ "entries": [
+        visit(0),
+        { "url": format!("https://example.com/?q={}", "x".repeat(2000)), "title": "huge" },
+        visit(2),
+        "not an object",
+        { "url": "https://example.com/when", "visited_at": "last tuesday" },
+        visit(5),
+    ]});
+    let push = |body: &Value| {
+        s.authed(Method::POST, "/v1/sync/history", &a)
+            .json(body)
+            .send()
+    };
+
+    let r = push(&batch).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["inserted"], 3, "{v}");
+    let rejected = v["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 3, "{v}");
+    assert_eq!(rejected[0]["index"], 1);
+    assert_eq!(rejected[0]["reason"], "too_large");
+    assert!(rejected[0]["message"].as_str().unwrap().contains("1024"));
+    assert_eq!(rejected[1]["index"], 3);
+    assert_eq!(rejected[1]["reason"], "not_object");
+    assert_eq!(rejected[2]["index"], 4);
+    assert_eq!(rejected[2]["reason"], "bad_visited_at");
+    let seq = v["seq"].as_i64().unwrap();
+    match events.try_recv().unwrap() {
+        copper_cloud_core::events::Event::History { seq: ev } => assert_eq!(ev, seq),
+        other => panic!("unexpected event {other:?}"),
+    }
+
+    // The good entries are stored, in order, exactly as sent.
+    let page: Value = s
+        .authed(Method::GET, "/v1/sync/history?since=0", &b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let got = page["entries"].as_array().unwrap();
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[0]["payload"], visit(0));
+    assert_eq!(got[1]["payload"], visit(2));
+    assert_eq!(got[2]["payload"], visit(5));
+    assert_eq!(got[2]["visited_at"], "2026-10-06T16:45:29.123Z");
+
+    // A batch of nothing but bad entries still succeeds (the client moves on); no event.
+    let r = push(&json!({ "entries": [{ "url": "x".repeat(2000) }] }))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["inserted"], 0);
+    assert_eq!(v["seq"], seq);
+    assert_eq!(v["rejected"][0]["index"], 0);
+    assert!(events.try_recv().is_err());
+
+    // Invalid UTF-8 inside one entry is repaired rather than failing the batch.
+    let raw = b"{\"entries\":[{\"url\":\"https://example.com/\xff\"}]}".to_vec();
+    let r = s
+        .authed(Method::POST, "/v1/sync/history", &a)
+        .header("content-type", "application/json")
+        .body(raw)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["inserted"], 1, "{v}");
+    assert_eq!(v["rejected"], json!([]));
+    assert!(matches!(
+        events.try_recv(),
+        Ok(copper_cloud_core::events::Event::History { .. })
+    ));
+
+    // Whole-request problems stay 400, with a message that says what is wrong.
+    let too_many: Vec<Value> = (0..11).map(visit).collect();
+    for (body, needle) in [
+        (json!({ "entries": too_many }), "too many entries: 11"),
+        (json!({ "entries": "nope" }), "invalid JSON body"),
+        (json!({ "visits": [] }), "missing field `entries`"),
+        (json!([visit(0)]), "invalid JSON body"),
+    ] {
+        let r = push(&body).await.unwrap();
+        assert_eq!(r.status(), 400, "{body}");
+        let v: Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "bad_request");
+        let msg = v["message"].as_str().unwrap();
+        assert!(msg.contains(needle), "{msg}");
+    }
+    let r = s
+        .authed(Method::POST, "/v1/sync/history", &a)
+        .body("{not json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    assert!(events.try_recv().is_err());
 }
 
 /// Read SSE frames until one with `event: <name>` arrives; returns its data JSON.

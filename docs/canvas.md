@@ -15,13 +15,14 @@ the rest of the [API](api.md). Errors use the common `{"error","message"}` shape
 |---|---|
 | `canvases` | `id`, `owner_id`, `name`, `kind` (`personal`/`shared`), `doc_key_wrapped`, timestamps |
 | `canvas_members` | `(canvas_id, user_id)`, `role` (`owner`/`editor`), `added_at` — the owner has a row too |
-| `canvas_invites` | email invites: `email` (lower-cased), `invited_by`, `status` (`pending`/`accepted`/`declined`), `token` (hash, reserved) |
+| `canvas_invites` | email invites: `email` (lower-cased), `invited_by`, `status` (`pending`/`accepted`/`declined`/`revoked`), `nudged_at` (last re-send reminder), `token` (hash, reserved) |
 | `canvas_share_links` | opaque share-link token digest, `role` (`editor`), `created_by`, `uses`; tokens are never persisted in plaintext |
 | `canvas_updates` | append-only Yjs update log: `seq bigserial`, `canvas_id`, `"update"` (sealed) |
 | `canvas_snapshots` | one compacted state per canvas: `seq` (last update folded in), `state` (sealed) |
 
-Migrations: `crates/copper-cloud/migrations/0100_canvases.sql` and
-`0101_canvas_share_links.sql` (the canvas crate owns `0100`–`0199`).
+Migrations: `crates/copper-cloud/migrations/0100_canvases.sql`,
+`0101_canvas_share_links.sql` and `0102_canvas_invite_nudge.sql` (the canvas crate owns
+`0100`–`0199`).
 
 - **Personal canvas**: every user has exactly one (`kind = personal`, name `Personal`),
   created on first use (`GET /canvases`, or any `/canvases/personal/...` route) — a unique
@@ -80,34 +81,68 @@ Owner first, then by join time. Any member may list.
 The owner removes anyone else; any member removes themselves (leave). The owner cannot leave
 (`400` — delete the canvas instead). Removed users' open sockets close with `4403`.
 
-### `POST /canvases/{id}/invites {email}` → `201` invite (`200` if already pending)
+### `POST /canvases/{id}/invites {email}` → `201` new invite · `200` already pending (re-send)
 
 Owner or editor. The email is trimmed and lower-cased; inviting yourself is `400`, an
 existing member `409`, the Personal canvas `400`. An email with no account yet is fine: the
 invite waits until someone signs up with it. Even when the email already belongs to a user,
 they must accept — nobody is added to a canvas without consent.
 
+- **New invite → `201`.** The invitee (if they have an account) gets a `canvas` event with
+  kind `invited`.
+- **Already pending → `200`** with the same invite, and the call is a **re-send**: if the
+  invitee has an account and the last reminder (`nudged_at`, else `created_at`) is at least
+  30 s old, `nudged_at` is set to now and the invitee gets another `invited` event — clients
+  use it to surface the invite again. Re-sends inside the 30 s window, or to an email with no
+  account yet, change nothing.
+
+The response is the invite view plus `nudged`: `true` only when this call reminded the
+invitee (a `200` re-send that was not throttled); `false` on `201` and when throttled or
+there is no account yet.
+
 ```json
 {
   "id": "…", "canvas_id": "…", "canvas_name": "Roadmap", "email": "bob@example.com",
   "status": "pending",
   "invited_by": { "id": "…", "email": "ann@example.com", "display_name": "Ann" },
-  "created_at": "…"
+  "invitee": { "id": "…", "email": "bob@example.com", "display_name": "Bob" },
+  "created_at": "…",
+  "nudged_at": "…",
+  "nudged": true
 }
 ```
 
+Invite views (here and in both lists below) carry:
+
+- `invitee` — the account with that email, or `null` while nobody has signed up with it
+  (e.g. "waiting for them to make an account");
+- `nudged_at` — RFC 3339 time of the last re-send reminder, `null` until the first one.
+
+Both fields (and `nudged`) are new in 0.5.0; older clients ignore them.
+
 ### `GET /canvases/{id}/invites`
 
-Pending invites of a canvas (any member).
+Pending invites of a canvas (any member), newest first.
+
+### `DELETE /canvases/{id}/invites/{invite_id}` → `204`
+
+Revoke a pending invite (0.5.0). Allowed for the canvas owner and for the member who sent
+it; any other member gets `403 {"error":"forbidden"}`. An unknown invite, one of another
+canvas, or one that is no longer pending (accepted, declined, already revoked) is
+`404 {"error":"not_found"}`; non-members get `404` as everywhere. The invite's status becomes
+`revoked`: it disappears from both lists, can no longer be accepted or declined (`404`), and
+the email can be invited again (a new `201`). The invitee (if they have an account) gets a
+`canvas` event with kind `invite_revoked`.
 
 ### `GET /invites`
 
-Pending invites addressed to **your** email (case-insensitive), with canvas name and inviter.
+Pending invites addressed to **your** email (case-insensitive), with canvas name and inviter,
+newest first.
 
 ### `POST /invites/{id}/accept` → canvas (your view, `role: editor`) · `POST /invites/{id}/decline` → `{"ok":true}`
 
 Only the invitee can accept or decline; anything else (wrong user, already used, declined,
-unknown) is `404`. Invites are single-use.
+revoked, unknown) is `404`. Invites are single-use.
 
 ### Canvas share links
 
@@ -203,7 +238,8 @@ Members get `event: canvas` on `GET /v1/sync/events`
 | `created` | owner | canvas created |
 | `renamed` | members | rename |
 | `deleted` | former members | delete |
-| `invited` | the invitee (if they have an account) | new invite |
+| `invited` | the invitee (if they have an account) | new invite, or a re-send reminder (at most every 30 s per invite) |
+| `invite_revoked` | the invitee (if they have an account) | owner or inviter revoked a pending invite |
 | `invite_declined` | the inviter | invite declined |
 | `member_added` | members | invite accepted |
 | `member_removed` | members + the removed user | member removed / left |
@@ -291,7 +327,8 @@ and CSP `default-src 'none'; style-src 'unsafe-inline'`.
 
 `cargo test -p copper-cloud-canvas` runs unit tests plus integration tests against the
 native Postgres database `copper_cloud_test_canvas` (`postgres://localhost:5432/…`, current
-OS user): REST lifecycle, Personal canvas, invites, 404 scoping, two-client sync + awareness,
+OS user): REST lifecycle, Personal canvas, invites (re-send reminders, revocation), 404
+scoping, two-client sync + awareness,
 persistence across eviction, compaction, ops fan-out, revocation.
 
 A cross-implementation test drives the real page code (Yjs, `y-websocket`,

@@ -2,8 +2,10 @@
 //! Prometheus `/metrics` listener.
 //!
 //! Request spans carry method, path (never the query string — it may hold `?token=`), the
-//! matched route, status, latency, client ip and `user_id` once authenticated. Tokens,
-//! passwords, keys and payloads are never logged.
+//! matched route, status, latency, client ip and `user_id` once authenticated. Error
+//! responses add `error` (the machine-readable code) and, for `400`s, `error_message` (the
+//! message the client got, with quoted input values redacted). Tokens, passwords, keys and
+//! payloads are never logged.
 
 use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
@@ -73,6 +75,10 @@ pub fn install_metrics() -> anyhow::Result<PrometheusHandle> {
         "Plaintext size of accepted sync doc writes"
     );
     metrics::describe_counter!("history_rows", "History entries appended");
+    metrics::describe_counter!(
+        "history_rejected",
+        "History entries skipped as invalid (the rest of their batch is stored)"
+    );
     metrics::describe_gauge!("sse_subscribers", "Open /v1/sync/events streams");
     metrics::describe_gauge!("db_pool_size", "Postgres pool connections (open)");
     metrics::describe_gauge!("db_pool_idle", "Postgres pool connections (idle)");
@@ -199,6 +205,8 @@ pub async fn track(State(state): State<SharedState>, req: Request, next: Next) -
         user_id = Empty,
         status = Empty,
         latency_ms = Empty,
+        error = Empty,
+        error_message = Empty,
     );
     let quiet = route == "/healthz";
     // A panicking handler becomes a logged 500 instead of a dropped connection.
@@ -221,6 +229,12 @@ pub async fn track(State(state): State<SharedState>, req: Request, next: Next) -
     let elapsed = start.elapsed();
     let status = response.status();
     span.record("status", status.as_u16());
+    if let Some(err) = response.extensions().get::<crate::error::ErrorLog>() {
+        span.record("error", err.code);
+        if let Some(message) = &err.message {
+            span.record("error_message", message.as_str());
+        }
+    }
     #[allow(clippy::cast_possible_truncation)]
     span.record("latency_ms", elapsed.as_secs_f64() * 1000.0);
     span.in_scope(|| {
@@ -241,4 +255,91 @@ pub async fn track(State(state): State<SharedState>, req: Request, next: Next) -
     metrics::histogram!("http_request_duration_seconds", "route" => route)
         .record(elapsed.as_secs_f64());
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Body;
+    use tower::ServiceExt as _;
+
+    use super::*;
+
+    /// Collects everything the subscriber writes.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn request_log_line_says_why_a_request_failed() {
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_writer(captured.clone())
+            .finish();
+        let _default = tracing::subscriber::set_default(subscriber);
+        let url = "postgres://localhost/unused";
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(url)
+            .unwrap();
+        let state = crate::state::AppState::new(pool, crate::config::Config::for_tests(url));
+        let app = Router::new()
+            .route(
+                "/bad",
+                get(|| async {
+                    crate::error::ApiError::bad_request(
+                        "entry 2: invalid type: string \"secret\", expected u64",
+                    )
+                }),
+            )
+            .route("/gone", get(|| async { crate::error::ApiError::NotFound }))
+            .layer(axum::middleware::from_fn_with_state(state.clone(), track))
+            .with_state(state);
+        for path in ["/bad", "/gone"] {
+            let req = Request::get(path).body(Body::empty()).unwrap();
+            app.clone().oneshot(req).await.unwrap();
+        }
+
+        let out = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<serde_json::Value> = out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .filter(|v: &serde_json::Value| v["message"] == "request")
+            .collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        let bad = &lines[0]["span"];
+        assert_eq!(bad["status"], 400);
+        assert_eq!(bad["error"], "bad_request");
+        assert_eq!(
+            bad["error_message"],
+            "entry 2: invalid type: string \"…\", expected u64"
+        );
+        assert!(!out.contains("secret"));
+        let gone = &lines[1]["span"];
+        assert_eq!(gone["status"], 404);
+        assert_eq!(gone["error"], "not_found");
+        assert!(gone.get("error_message").is_none());
+    }
 }

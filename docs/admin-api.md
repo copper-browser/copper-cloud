@@ -153,7 +153,7 @@ redirect — check the code). `new` shorter than 10 chars → `400`.
 
 ```json
 {
-  "version": "0.4.0 (abc1234)",
+  "version": "0.5.0 (abc1234)",
   "uptime_s": 86400,
   "access_mode": "directory",
   "allow_signup": true,
