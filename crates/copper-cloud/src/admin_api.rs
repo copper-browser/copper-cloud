@@ -619,6 +619,9 @@ struct IntelligencePut {
     jev: intelligence::Change<intelligence::JevInput>,
     #[serde(default)]
     router: intelligence::Change<intelligence::RouterInput>,
+    /// Org-wide agent round budget (`{"max_turns": N}`, `null` clears); not a key.
+    #[serde(default)]
+    agent: intelligence::Change<intelligence::AgentInput>,
     enabled: Option<bool>,
 }
 
@@ -630,6 +633,7 @@ async fn put_intelligence(
     let update = intelligence::Update {
         jev: req.jev,
         router: req.router,
+        agent: req.agent,
         enabled: req.enabled,
     };
     let settings = if update.is_noop() {

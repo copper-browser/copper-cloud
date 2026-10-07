@@ -153,7 +153,8 @@ next fetch; `updated_at` changes).
 
 - Storage: `intelligence_settings` (singleton row). A random 32-byte data key is wrapped by the
   KEK (`data_key_wrapped`); each API key is AES-256-GCM sealed under it with AAD
-  `intelligence:jev` / `intelligence:router`. Endpoint, model and URL are plaintext.
+  `intelligence:jev` / `intelligence:router`. Endpoint, model and URL are plaintext, as is the
+  org agent round budget (`agent_max_turns`, not a secret).
 - Reads require the gate credential **and** a valid user session (disabled users have none).
   The response is `Cache-Control: no-store`. The admin toggle `enabled = false` withholds the
   keys without deleting them.

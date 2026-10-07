@@ -7,7 +7,7 @@ sudo copper-cloud doctor
 ```
 
 ```
-copper-cloud doctor (0.6.0)
+copper-cloud doctor (0.7.0)
   ok    config      /etc/copper-cloud/copper-cloud.toml
   ok    database    PostgreSQL 16.4 (postgres://copper_cloud:***@127.0.0.1:5432/copper_cloud)
   ok    migrations  7 applied, none pending
@@ -188,7 +188,9 @@ sudo copper-cloud intelligence set --router-url https://llm.example.com  # keeps
 sudo copper-cloud intelligence show        # masked: last 4 characters only
 sudo copper-cloud intelligence disable     # keep the keys, stop handing them out
 sudo copper-cloud intelligence enable
-sudo copper-cloud intelligence clear [--jev | --router]
+sudo copper-cloud intelligence clear [--jev | --router]   # keys only; the agent budget stays
+sudo copper-cloud intelligence set --agent-max-turns 100   # org-wide agent rounds per question (1-500)
+sudo copper-cloud intelligence clear --agent              # back to each Copper's own setting
 shred -u /root/jev.key /root/router.key
 ```
 
@@ -198,6 +200,11 @@ the portal's activity log). Anyone who can sign in can use the keys — give eac
 own budget-capped router key (e.g. a dedicated LiteLLM virtual key) and rotate by setting a new
 one. The keys are sealed under the `master_key`; restoring a DB dump without it loses them (set
 them again).
+
+The agent budget (`--agent-max-turns`, portal **AI keys › Agent**) caps how many rounds of tool
+calls Copper's agent pane runs for one question, for everyone. It is not a key: it is served by
+`GET /v1/intelligence` even when sharing is off or no keys are set, and a plain `clear` keeps it.
+Blank/cleared = each person's own Copper setting (default 60).
 
 ### Access mode and access keys
 

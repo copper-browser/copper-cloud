@@ -1,10 +1,12 @@
 //! Cloud-wide intelligence keys: one Jev (`TypeSafe`) key and one LLM router (`LiteLLM`) key
-//! set by the instance admin and handed to every signed-in Copper by `GET /v1/intelligence`.
+//! set by the instance admin and handed to every signed-in Copper by `GET /v1/intelligence`,
+//! plus the org-wide agent tool-call round budget (`agent.max_turns`), which is served
+//! regardless of key sharing.
 //!
 //! Storage (`intelligence_settings`, singleton row): a random 32-byte data key wrapped by the
 //! KEK, each API key AES-256-GCM sealed under it with AAD `intelligence:jev` /
-//! `intelligence:router`. Endpoints/model/URL are plaintext. Key material never reaches logs
-//! or the admin API (which only sees the last four characters).
+//! `intelligence:router`. Endpoints/model/URL and the agent budget are plaintext. Key material
+//! never reaches logs or the admin API (which only sees the last four characters).
 //!
 //! Writers: the admin API (`/admin/api/intelligence`) and `copper-cloud intelligence …`. Both
 //! go through [`apply`] and [`clear`] and write an `admin_audit` row. User reads are audited
@@ -29,6 +31,11 @@ use crate::state::SharedState;
 pub const DEFAULT_JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 pub const DEFAULT_JEV_MODEL: &str = "jev-latest";
 pub const DEFAULT_ROUTER_URL: &str = "https://llm.example.com";
+
+/// Copper's own agent round budget when the org sets none (shown to the admin as a hint).
+pub const DEFAULT_AGENT_MAX_TURNS: i32 = 60;
+/// Bounds of `agent.max_turns`; nothing outside them is stored or served.
+pub const AGENT_MAX_TURNS_RANGE: std::ops::RangeInclusive<i32> = 1..=500;
 
 const AAD_JEV: &[u8] = b"intelligence:jev";
 const AAD_ROUTER: &[u8] = b"intelligence:router";
@@ -118,25 +125,42 @@ pub struct Settings {
     pub jev: Option<Jev>,
     pub router: Option<RouterKey>,
     pub enabled: bool,
+    /// Org-wide agent tool-call rounds per question (`None` = each Copper's own setting).
+    /// Not a key: independent of `enabled`.
+    pub agent_max_turns: Option<i32>,
     pub updated_at: Option<OffsetDateTime>,
     pub updated_by: Option<String>,
 }
 
 impl Settings {
-    /// Nothing stored at all (no row, or a row with both blocks cleared).
+    /// No keys stored (no row, or a row with both key blocks cleared). The agent budget does
+    /// not count: it is not a key and is served either way.
     pub fn is_empty(&self) -> bool {
         self.jev.is_none() && self.router.is_none()
     }
 
-    /// The `GET /v1/intelligence` body: keys in clear, nulls when unset or sharing is off.
+    /// `{"max_turns": N}`, or `null` when the org sets no budget.
+    fn agent_view(&self) -> Value {
+        self.agent_max_turns
+            .map_or(Value::Null, |n| json!({ "max_turns": n }))
+    }
+
+    /// The `GET /v1/intelligence` body: keys in clear, nulls when unset or sharing is off;
+    /// `agent` always reflects the org budget.
     pub fn user_view(&self) -> Value {
         if !self.enabled || self.is_empty() {
-            return json!({ "jev": null, "router": null, "updated_at": null });
+            return json!({
+                "jev": null,
+                "router": null,
+                "updated_at": null,
+                "agent": self.agent_view(),
+            });
         }
         json!({
             "jev": self.jev,
             "router": self.router,
             "updated_at": self.updated_at.map(rfc3339),
+            "agent": self.agent_view(),
         })
     }
 
@@ -153,12 +177,14 @@ impl Settings {
                 "key_last4": last4(&r.key),
                 "url": r.url,
             })),
+            "agent": self.agent_view(),
             "updated_at": self.updated_at.map(rfc3339),
             "updated_by": self.updated_by,
             "defaults": {
                 "jev_endpoint": DEFAULT_JEV_ENDPOINT,
                 "jev_model": DEFAULT_JEV_MODEL,
                 "router_url": DEFAULT_ROUTER_URL,
+                "agent_max_turns": DEFAULT_AGENT_MAX_TURNS,
             },
         })
     }
@@ -186,12 +212,13 @@ type Row = (
     Option<Vec<u8>>,
     Option<String>,
     bool,
+    Option<i32>,
     OffsetDateTime,
     Option<String>,
 );
 
 const SELECT_SQL: &str = "SELECT data_key_wrapped, jev_key_sealed, jev_endpoint, jev_model,
-       router_key_sealed, router_url, enabled, updated_at, updated_by
+       router_key_sealed, router_url, enabled, agent_max_turns, updated_at, updated_by
 FROM intelligence_settings WHERE id = 1";
 
 fn open_key(data_key: &[u8; 32], aad: &[u8], sealed: &[u8]) -> ApiResult<String> {
@@ -208,6 +235,7 @@ fn decode(crypto: &Crypto, row: Option<Row>) -> ApiResult<Settings> {
         router_sealed,
         router_url,
         enabled,
+        agent_max_turns,
         at,
         by,
     )) = row
@@ -233,11 +261,12 @@ fn decode(crypto: &Crypto, row: Option<Row>) -> ApiResult<Settings> {
         }),
         _ => None,
     };
-    let empty = jev.is_none() && router.is_none();
+    let empty = jev.is_none() && router.is_none() && agent_max_turns.is_none();
     Ok(Settings {
         jev,
         router,
         enabled,
+        agent_max_turns,
         updated_at: (!empty).then_some(at),
         updated_by: if empty { None } else { by },
     })
@@ -276,6 +305,13 @@ pub struct JevInput {
 pub struct RouterInput {
     pub key: Option<String>,
     pub url: Option<String>,
+}
+
+/// New agent budget: rounds of tool calls per question, `1..=500`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentInput {
+    pub max_turns: i64,
 }
 
 impl std::fmt::Debug for JevInput {
@@ -325,6 +361,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Change<T> {
 pub struct Update {
     pub jev: Change<JevInput>,
     pub router: Change<RouterInput>,
+    pub agent: Change<AgentInput>,
     pub enabled: Option<bool>,
 }
 
@@ -332,8 +369,23 @@ impl Update {
     pub fn is_noop(&self) -> bool {
         matches!(self.jev, Change::Keep)
             && matches!(self.router, Change::Keep)
+            && matches!(self.agent, Change::Keep)
             && self.enabled.is_none()
     }
+}
+
+/// Validate an agent round budget: an integer in [`AGENT_MAX_TURNS_RANGE`].
+pub fn clean_max_turns(n: i64) -> ApiResult<i32> {
+    i32::try_from(n)
+        .ok()
+        .filter(|n| AGENT_MAX_TURNS_RANGE.contains(n))
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "agent max_turns must be an integer from {} to {}",
+                AGENT_MAX_TURNS_RANGE.start(),
+                AGENT_MAX_TURNS_RANGE.end()
+            ))
+        })
 }
 
 /// Validate an API key: trimmed, 8–4096 characters, printable ASCII without spaces.
@@ -473,6 +525,18 @@ pub async fn apply(
             Some(r)
         }
     };
+    let agent_max_turns = match &update.agent {
+        Change::Keep => current.agent_max_turns,
+        Change::Clear => {
+            changed.insert("agent".into(), Value::Null);
+            None
+        }
+        Change::Set(input) => {
+            let n = clean_max_turns(input.max_turns)?;
+            changed.insert("agent".into(), json!({ "max_turns": n }));
+            Some(n)
+        }
+    };
     let enabled = update.enabled.unwrap_or(current.enabled);
     if let Some(e) = update.enabled {
         changed.insert("enabled".into(), Value::Bool(e));
@@ -491,7 +555,7 @@ pub async fn apply(
         .as_ref()
         .map(|r| Crypto::seal(&data_key, AAD_ROUTER, r.key.as_bytes()));
 
-    if jev.is_none() && router.is_none() && enabled {
+    if jev.is_none() && router.is_none() && agent_max_turns.is_none() && enabled {
         // Nothing left to store (and sharing is on, the default): drop the row.
         if existed {
             sqlx::query("DELETE FROM intelligence_settings WHERE id = 1")
@@ -501,8 +565,9 @@ pub async fn apply(
     } else {
         sqlx::query(
             "INSERT INTO intelligence_settings (id, data_key_wrapped, jev_key_sealed, jev_endpoint,
-                 jev_model, router_key_sealed, router_url, enabled, updated_at, updated_by)
-             VALUES (1, $1, $2, $3, $4, $5, $6, $7, now(), $8)
+                 jev_model, router_key_sealed, router_url, enabled, agent_max_turns, updated_at,
+                 updated_by)
+             VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, now(), $9)
              ON CONFLICT (id) DO UPDATE SET
                  data_key_wrapped = EXCLUDED.data_key_wrapped,
                  jev_key_sealed = EXCLUDED.jev_key_sealed,
@@ -511,6 +576,7 @@ pub async fn apply(
                  router_key_sealed = EXCLUDED.router_key_sealed,
                  router_url = EXCLUDED.router_url,
                  enabled = EXCLUDED.enabled,
+                 agent_max_turns = EXCLUDED.agent_max_turns,
                  updated_at = now(),
                  updated_by = EXCLUDED.updated_by",
         )
@@ -521,6 +587,7 @@ pub async fn apply(
         .bind(router_sealed)
         .bind(router.as_ref().map(|r| r.url.as_str()))
         .bind(enabled)
+        .bind(agent_max_turns)
         .bind(actor.label())
         .execute(&mut *tx)
         .await?;
@@ -541,14 +608,30 @@ pub async fn apply(
     load(db, crypto).await
 }
 
-/// Remove every stored key (and reset sharing to on). Returns whether anything was stored.
+/// Remove every stored key (and reset sharing to on). The org agent budget is not a key and
+/// stays (clear it with an [`Update`]). Returns whether anything was removed or reset.
 pub async fn clear(db: &sqlx::PgPool, actor: &Actor) -> ApiResult<bool> {
     let mut tx = db.begin().await?;
-    let removed = sqlx::query("DELETE FROM intelligence_settings WHERE id = 1")
+    let mut removed =
+        sqlx::query("DELETE FROM intelligence_settings WHERE id = 1 AND agent_max_turns IS NULL")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+    if !removed {
+        removed = sqlx::query(
+            "UPDATE intelligence_settings SET jev_key_sealed = NULL, jev_endpoint = NULL,
+                 jev_model = NULL, router_key_sealed = NULL, router_url = NULL, enabled = true,
+                 updated_at = now(), updated_by = $1
+             WHERE id = 1
+               AND (jev_key_sealed IS NOT NULL OR router_key_sealed IS NOT NULL OR NOT enabled)",
+        )
+        .bind(actor.label())
         .execute(&mut *tx)
         .await?
         .rows_affected()
-        > 0;
+            > 0;
+    }
     if removed {
         audit(
             &mut *tx,
@@ -616,7 +699,11 @@ async fn get_intelligence(State(state): State<SharedState>, user: AuthUser) -> A
         .await?;
         metrics::counter!("intelligence_reads_total").increment(1);
     }
-    tracing::info!(served, "intelligence keys requested");
+    tracing::info!(
+        served,
+        agent_max_turns = settings.agent_max_turns,
+        "intelligence keys requested"
+    );
     let mut resp = Json(settings.user_view()).into_response();
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -646,6 +733,37 @@ mod tests {
         assert!(clean_url("https://", "u").is_err());
         assert!(clean_url("https:///path", "u").is_err());
         assert!(clean_url("https://a b", "u").is_err());
+        assert_eq!(clean_max_turns(1).unwrap(), 1);
+        assert_eq!(clean_max_turns(500).unwrap(), 500);
+        for bad in [0, -1, 501, i64::from(i32::MAX) + 1, i64::MIN] {
+            assert_eq!(clean_max_turns(bad).unwrap_err().status(), 400, "{bad}");
+        }
+    }
+
+    #[test]
+    fn agent_input_json() {
+        let ok: Change<AgentInput> = serde_json::from_value(json!({ "max_turns": 100 })).unwrap();
+        assert!(matches!(ok, Change::Set(AgentInput { max_turns: 100 })));
+        let clear: Change<AgentInput> = serde_json::from_value(Value::Null).unwrap();
+        assert!(matches!(clear, Change::Clear));
+        for bad in [
+            json!({ "max_turns": 1.5 }),
+            json!({ "max_turns": "100" }),
+            json!({}),
+            json!({ "max_turns": 10, "extra": 1 }),
+            json!(100),
+        ] {
+            assert!(
+                serde_json::from_value::<Change<AgentInput>>(bad.clone()).is_err(),
+                "{bad}"
+            );
+        }
+        let u = Update {
+            agent: Change::Clear,
+            ..Update::default()
+        };
+        assert!(!u.is_noop());
+        assert!(Update::default().is_noop());
     }
 
     #[test]
@@ -656,7 +774,7 @@ mod tests {
         };
         assert_eq!(
             empty.user_view(),
-            json!({ "jev": null, "router": null, "updated_at": null })
+            json!({ "jev": null, "router": null, "updated_at": null, "agent": null })
         );
         let s = Settings {
             jev: Some(Jev {
@@ -666,6 +784,7 @@ mod tests {
             }),
             router: None,
             enabled: true,
+            agent_max_turns: None,
             updated_at: Some(time::macros::datetime!(2026-10-03 12:00 UTC)),
             updated_by: Some("cli".into()),
         };
@@ -675,6 +794,7 @@ mod tests {
                 "jev": { "key": "jev-key-0123456789", "endpoint": DEFAULT_JEV_ENDPOINT, "model": DEFAULT_JEV_MODEL },
                 "router": null,
                 "updated_at": "2026-10-03T12:00:00Z",
+                "agent": null,
             })
         );
         let masked = s.masked_view().to_string();
@@ -685,5 +805,53 @@ mod tests {
             ..s
         };
         assert_eq!(off.user_view()["jev"], Value::Null);
+    }
+
+    #[test]
+    fn agent_is_served_independently_of_keys() {
+        let agent = json!({ "max_turns": 100 });
+        // No keys at all: still served (and the keys stay null).
+        let only_agent = Settings {
+            enabled: true,
+            agent_max_turns: Some(100),
+            updated_at: Some(time::macros::datetime!(2026-10-06 12:00 UTC)),
+            ..Settings::default()
+        };
+        assert!(only_agent.is_empty(), "is_empty is about keys only");
+        assert_eq!(
+            only_agent.user_view(),
+            json!({ "jev": null, "router": null, "updated_at": null, "agent": agent })
+        );
+        // Keys stored but sharing off: keys withheld, agent served.
+        let off = Settings {
+            router: Some(RouterKey {
+                key: "sk-router-0123456789".into(),
+                url: DEFAULT_ROUTER_URL.into(),
+            }),
+            enabled: false,
+            agent_max_turns: Some(100),
+            ..Settings::default()
+        };
+        assert!(!off.is_empty());
+        assert_eq!(
+            off.user_view(),
+            json!({ "jev": null, "router": null, "updated_at": null, "agent": agent })
+        );
+        // Sharing on: both.
+        let on = Settings {
+            enabled: true,
+            ..off
+        };
+        let v = on.user_view();
+        assert_eq!(v["agent"], agent);
+        assert_eq!(v["router"]["key"], "sk-router-0123456789");
+        // Admin view: value + the client default as a hint.
+        let masked = on.masked_view();
+        assert_eq!(masked["agent"], agent);
+        assert_eq!(
+            masked["defaults"]["agent_max_turns"],
+            DEFAULT_AGENT_MAX_TURNS
+        );
+        assert_eq!(Settings::default().masked_view()["agent"], Value::Null);
     }
 }

@@ -89,7 +89,7 @@ Key only (no session). Lets a client validate a link code before showing account
 ```json
 {
   "name": "copper-cloud",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "signup": true,
   "access_mode": "directory",
   "limits": { "max_blob_bytes": 8000000, "max_history_batch": 2000, "max_history_entry_bytes": 16384 }
@@ -448,17 +448,25 @@ LiteLLM or Jev key. Same gate and session as every other `/v1` user endpoint (ga
     "key": "<LiteLLM virtual key>",
     "url": "https://llm.example.com"
   },
-  "updated_at": "2026-10-05T20:45:00Z"
+  "updated_at": "2026-10-05T20:45:00Z",
+  "agent": { "max_turns": 100 }
 }
-// 200 — nothing set, or the admin turned sharing off
-{ "jev": null, "router": null, "updated_at": null }
+// 200 — no keys set, or the admin turned sharing off (the agent budget is still served)
+{ "jev": null, "router": null, "updated_at": null, "agent": { "max_turns": 100 } }
+// 200 — nothing set at all
+{ "jev": null, "router": null, "updated_at": null, "agent": null }
 ```
 
-- Exactly these three fields. Each block is an object or `null` independently (an instance
+- Exactly these four fields. Each block is an object or `null` independently (an instance
   may share only a router key). `updated_at` (RFC 3339) changes whenever the admin changes
   anything; clients can use it to notice rotation. It is `null` exactly when both blocks are.
 - `router.url` is the gateway base URL without a trailing `/` (OpenAI-compatible:
   `POST {url}/v1/chat/completions` with `Authorization: Bearer {key}`).
+- `agent` (copper-cloud 0.7.0+) is the org-wide budget of tool-call rounds per question for
+  Copper's agent pane: `{"max_turns": N}` with N an integer in 1–500, or `null` when the org
+  sets none. It is **independent of key sharing** — present even when `jev`/`router` are
+  `null`. `null` (or the field absent, from older servers) ⇒ use the local setting; a value
+  wins over the local setting while present.
 - Re-fetch at launch and periodically; when a block turns `null`, stop using the key you had.
 - Reads are recorded in the admin audit log (`intelligence.read`, at most once per user per
   hour). Keys never appear in server logs.

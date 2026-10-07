@@ -67,7 +67,7 @@ it. The query string is never logged (it can carry `?token=`).
 | `server_settings` | `key` | runtime settings from the admin CLI / portal (`allow_signup`, `access_mode`) |
 | `access_keys` | `id`; `key_sha256` unique | per-person gate credentials: `label`, `email?`, `expires_at?`, `revoked_at?`, `uses`/`max_uses?`, `last_used_at` |
 | `pairing_codes` | `id`; `code_sha256` unique | single-use, 10-min codes: `user_id`, `device_name?`, `used_at`, `used_by_device` |
-| `intelligence_settings` | `id` = 1 (singleton) | cloud-wide AI keys: `data_key_wrapped`, sealed `jev_key_sealed` / `router_key_sealed`, `jev_endpoint`, `jev_model`, `router_url`, `enabled`, `updated_at/by` |
+| `intelligence_settings` | `id` = 1 (singleton) | cloud-wide AI keys: `data_key_wrapped`, sealed `jev_key_sealed` / `router_key_sealed`, `jev_endpoint`, `jev_model`, `router_url`, `enabled`, `agent_max_turns` (org agent round budget, 1–500 or NULL), `updated_at/by` |
 | `admins` | `id`; `lower(email)` unique | portal admin accounts (Argon2id), `last_login_at` |
 | `admin_sessions` | `id`; `token_sha256` unique | `cc_admin` cookie sessions, fixed 7-day `expires_at` |
 | `admin_audit` | `id` bigserial | every admin mutation: `admin_id`, `action`, `target`, `detail` jsonb, `at` |

@@ -99,6 +99,15 @@ export function describeAudit(entry: AuditEntry, self: boolean): AuditLine {
       else if (d.jev) parts.push("updated the Jev settings");
       if (d.router === null) parts.push("removed the router key");
       else if (d.router) parts.push("updated the router settings");
+      if (d.agent === null) parts.push("removed the agent round limit");
+      else if (d.agent && typeof d.agent === "object") {
+        const n = (d.agent as { max_turns?: unknown }).max_turns;
+        parts.push(
+          typeof n === "number"
+            ? `set the agent round limit to ${n}`
+            : "set the agent round limit",
+        );
+      }
       if (d.enabled === true) parts.push("turned AI key sharing on");
       if (d.enabled === false) parts.push("turned AI key sharing off");
       return {

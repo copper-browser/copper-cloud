@@ -64,18 +64,20 @@ pub enum Command {
     /// User, admin-account, access-mode and signup administration.
     #[command(subcommand)]
     Admin(AdminCommand),
-    /// Cloud-wide intelligence keys (Jev + LLM router) every signed-in Copper receives.
+    /// Cloud-wide intelligence keys (Jev + LLM router) every signed-in Copper receives, and the
+    /// org-wide agent tool-call round budget.
     #[command(subcommand)]
     Intelligence(IntelligenceCommand),
 }
 
 #[derive(Subcommand, Debug)]
 pub enum IntelligenceCommand {
-    /// Set or update the keys. Keys are read from files (or "-" for stdin), never argv.
+    /// Set or update the keys and/or the agent round budget. Keys are read from files (or "-"
+    /// for stdin), never argv.
     Set(IntelligenceSetArgs),
-    /// Show the settings with keys masked (last 4 characters).
+    /// Show the settings with keys masked (last 4 characters) and the agent round budget.
     Show,
-    /// Remove the stored keys (both by default).
+    /// Remove the stored keys (both by default; the agent budget stays unless --agent).
     Clear {
         /// Only clear the Jev block.
         #[arg(long, conflicts_with = "router")]
@@ -83,6 +85,9 @@ pub enum IntelligenceCommand {
         /// Only clear the router block.
         #[arg(long)]
         router: bool,
+        /// Clear the org-wide agent round budget (each Copper uses its own setting again).
+        #[arg(long)]
+        agent: bool,
     },
     /// Hand the stored keys to Coppers (the default once keys are set).
     Enable,
@@ -107,6 +112,10 @@ pub struct IntelligenceSetArgs {
     /// Router base URL (default https://llm.example.com).
     #[arg(long, value_name = "URL")]
     pub router_url: Option<String>,
+    /// Org-wide tool-call rounds per question for Copper's agent (1-500); overrides each
+    /// Copper's own setting while set.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(i64).range(1..=500))]
+    pub agent_max_turns: Option<i64>,
 }
 
 #[derive(Args, Debug, Default)]
@@ -562,5 +571,50 @@ mod tests {
             "--router"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn intelligence_agent_flags() {
+        // Agent round budget: 1..=500 on argv, cleared with `clear --agent`.
+        let cli = Cli::try_parse_from([
+            "copper-cloud",
+            "intelligence",
+            "set",
+            "--agent-max-turns",
+            "100",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Intelligence(IntelligenceCommand::Set(
+                IntelligenceSetArgs {
+                    agent_max_turns: Some(100),
+                    ..
+                }
+            )))
+        ));
+        for bad in ["0", "501", "-1", "1.5", "x"] {
+            assert!(
+                Cli::try_parse_from([
+                    "copper-cloud",
+                    "intelligence",
+                    "set",
+                    "--agent-max-turns",
+                    bad
+                ])
+                .is_err(),
+                "{bad}"
+            );
+        }
+        let cli =
+            Cli::try_parse_from(["copper-cloud", "intelligence", "clear", "--agent"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Intelligence(IntelligenceCommand::Clear {
+                agent: true,
+                jev: false,
+                router: false
+            }))
+        ));
     }
 }

@@ -99,21 +99,35 @@ export interface RouterKeyView {
   url: string;
 }
 
+/** Org-wide agent round budget: tool-call rounds per question, 1–500. Not a key. */
+export interface AgentSettings {
+  max_turns: number;
+}
+
 export interface IntelligenceSettings {
   /** Signed-in Coppers receive the keys (GET /v1/intelligence) while true. */
   enabled: boolean;
   jev: JevKeyView | null;
   router: RouterKeyView | null;
+  /** `null` = each person's own Copper setting. Served regardless of `enabled`. */
+  agent: AgentSettings | null;
   updated_at: string | null;
   /** Admin email, or `"cli"` for `copper-cloud intelligence …`. */
   updated_by: string | null;
-  defaults: { jev_endpoint: string; jev_model: string; router_url: string };
+  defaults: {
+    jev_endpoint: string;
+    jev_model: string;
+    router_url: string;
+    /** Copper's own default when the org sets no budget. */
+    agent_max_turns: number;
+  };
 }
 
 /** `PUT intelligence`: omit a block to keep it, `null` clears it; omit `key` to keep the stored one. */
 export interface IntelligenceUpdate {
   jev?: { key?: string; endpoint?: string; model?: string } | null;
   router?: { key?: string; url?: string } | null;
+  agent?: AgentSettings | null;
   enabled?: boolean;
 }
 

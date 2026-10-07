@@ -46,7 +46,7 @@ async fn intelligence_keys_end_to_end() {
     assert_eq!(r.headers()["cache-control"], "no-store");
     assert_eq!(
         json_of(r).await,
-        json!({ "jev": null, "router": null, "updated_at": null })
+        json!({ "jev": null, "router": null, "updated_at": null, "agent": null })
     );
 
     // Admin API needs a session and the CSRF header.
@@ -132,7 +132,8 @@ async fn intelligence_keys_end_to_end() {
     assert_eq!(r.status(), 200);
     let v = json_of(r).await;
     let obj = v.as_object().unwrap();
-    assert_eq!(obj.len(), 3, "{v}");
+    assert_eq!(obj.len(), 4, "{v}");
+    assert_eq!(v["agent"], Value::Null);
     assert_eq!(
         v["jev"],
         json!({ "key": JEV_KEY, "endpoint": "https://api.typesafe.ai/v1/systemone", "model": "jev-latest" })
@@ -185,7 +186,7 @@ async fn intelligence_keys_end_to_end() {
         .unwrap();
     assert_eq!(
         v,
-        json!({ "jev": null, "router": null, "updated_at": null })
+        json!({ "jev": null, "router": null, "updated_at": null, "agent": null })
     );
     s.admin(Method::PUT, "intelligence", Some(&c))
         .json(&json!({ "enabled": true }))
@@ -268,7 +269,7 @@ async fn intelligence_keys_end_to_end() {
         .unwrap();
     assert_eq!(
         v,
-        json!({ "jev": null, "router": null, "updated_at": null })
+        json!({ "jev": null, "router": null, "updated_at": null, "agent": null })
     );
 }
 
@@ -334,4 +335,193 @@ async fn intelligence_works_with_access_keys_and_survives_wrong_master_key() {
     assert!(admin_id.is_none());
     assert_eq!(detail["via"], "cli");
     assert!(!detail.to_string().contains(ROUTER_KEY));
+}
+
+#[tokio::test]
+async fn agent_max_turns_is_org_wide_and_independent_of_keys() {
+    let s = start().await;
+    s.create_admin().await;
+    let c = s.admin_login().await;
+    let ana = s.signup("ana@example.com", PASSWORD, &new_device()).await;
+    let user_view = || async {
+        s.authed(Method::GET, "/v1/intelligence", &ana)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    let put = |body: Value| {
+        let req = s.admin(Method::PUT, "intelligence", Some(&c)).json(&body);
+        async move { req.send().await.unwrap() }
+    };
+
+    // Unset: null for users, null + the client default for the admin.
+    assert_eq!(user_view().await["agent"], Value::Null);
+    let v = json_of(
+        s.admin(Method::GET, "intelligence", Some(&c))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(v["agent"], Value::Null);
+    assert_eq!(v["defaults"]["agent_max_turns"], 60);
+
+    // Validation: integers 1..=500 in an object; nothing is stored on a 400.
+    for bad in [
+        json!({ "agent": { "max_turns": 0 } }),
+        json!({ "agent": { "max_turns": 501 } }),
+        json!({ "agent": { "max_turns": -1 } }),
+        json!({ "agent": { "max_turns": 1.5 } }),
+        json!({ "agent": { "max_turns": "100" } }),
+        json!({ "agent": { "max_turns": 100_000_000_000_i64 } }),
+        json!({ "agent": { "max_turns": null } }),
+        json!({ "agent": {} }),
+        json!({ "agent": { "max_turns": 100, "extra": 1 } }),
+        json!({ "agent": 100 }),
+    ] {
+        let r = put(bad.clone()).await;
+        assert_eq!(r.status(), 400, "{bad}");
+        assert!(json_of(r).await["message"].is_string(), "{bad}");
+    }
+    assert_eq!(user_view().await["agent"], Value::Null);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM intelligence_settings")
+        .fetch_one(&s.state.db)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+
+    // Bounds are inclusive. With no keys at all the budget is still served.
+    for n in [1, 500, 100] {
+        let r = put(json!({ "agent": { "max_turns": n } })).await;
+        assert_eq!(r.status(), 200);
+        let v = json_of(r).await;
+        assert_eq!(v["agent"], json!({ "max_turns": n }));
+        assert_eq!(v["jev"], Value::Null);
+    }
+    assert_eq!(
+        user_view().await,
+        json!({ "jev": null, "router": null, "updated_at": null, "agent": { "max_turns": 100 } })
+    );
+
+    // Keys set alongside; an absent "agent" keeps the budget.
+    let r = put(json!({ "router": { "key": ROUTER_KEY } })).await;
+    assert_eq!(json_of(r).await["agent"]["max_turns"], 100);
+    let v = user_view().await;
+    assert_eq!(v["router"]["key"], ROUTER_KEY);
+    assert_eq!(v["agent"], json!({ "max_turns": 100 }));
+
+    // Sharing off withholds the keys but not the budget.
+    put(json!({ "enabled": false })).await;
+    assert_eq!(
+        user_view().await,
+        json!({ "jev": null, "router": null, "updated_at": null, "agent": { "max_turns": 100 } })
+    );
+    put(json!({ "enabled": true })).await;
+
+    // DELETE clears the keys only: the budget is not a key.
+    let v = json_of(
+        s.admin(Method::DELETE, "intelligence", Some(&c))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(v["router"], Value::Null);
+    assert_eq!(v["agent"], json!({ "max_turns": 100 }));
+    assert_eq!(
+        user_view().await,
+        json!({ "jev": null, "router": null, "updated_at": null, "agent": { "max_turns": 100 } })
+    );
+
+    // The database refuses out-of-range values too.
+    assert!(
+        sqlx::query("UPDATE intelligence_settings SET agent_max_turns = 501 WHERE id = 1")
+            .execute(&s.state.db)
+            .await
+            .is_err()
+    );
+
+    // `null` clears; with nothing else stored the row goes away.
+    let v = json_of(put(json!({ "agent": null })).await).await;
+    assert_eq!(v["agent"], Value::Null);
+    assert_eq!(v["updated_at"], Value::Null);
+    assert_eq!(user_view().await["agent"], Value::Null);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM intelligence_settings")
+        .fetch_one(&s.state.db)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+
+    // Audited like the keys: set and clear, with the admin and the value.
+    let details: Vec<(Option<uuid::Uuid>, Value)> = sqlx::query_as(
+        "SELECT admin_id, detail FROM admin_audit
+         WHERE action = 'intelligence.update' AND detail ? 'agent' ORDER BY at, id",
+    )
+    .fetch_all(&s.state.db)
+    .await
+    .unwrap();
+    let agents: Vec<&Value> = details.iter().map(|(_, d)| &d["agent"]).collect();
+    assert_eq!(
+        agents,
+        [
+            &json!({ "max_turns": 1 }),
+            &json!({ "max_turns": 500 }),
+            &json!({ "max_turns": 100 }),
+            &Value::Null,
+        ]
+    );
+    assert!(details
+        .iter()
+        .all(|(a, d)| a.is_some() && d["via"] == "admin_api"));
+
+    // CLI: `intelligence set --agent-max-turns` / `clear --agent`, audited as the CLI.
+    let cfg = (*s.state.cfg).clone();
+    copper_cloud::admin::intelligence(
+        cfg.clone(),
+        copper_cloud::cli::IntelligenceCommand::Set(copper_cloud::cli::IntelligenceSetArgs {
+            agent_max_turns: Some(250),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(user_view().await["agent"], json!({ "max_turns": 250 }));
+    copper_cloud::admin::intelligence(cfg.clone(), copper_cloud::cli::IntelligenceCommand::Show)
+        .await
+        .unwrap();
+    // A plain `clear` keeps the budget; `clear --agent` drops it.
+    for (agent, expect) in [(false, json!({ "max_turns": 250 })), (true, Value::Null)] {
+        copper_cloud::admin::intelligence(
+            cfg.clone(),
+            copper_cloud::cli::IntelligenceCommand::Clear {
+                jev: false,
+                router: false,
+                agent,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(user_view().await["agent"], expect);
+    }
+    // Out of range through the library path (clap already refuses it on argv).
+    assert!(copper_cloud::admin::intelligence(
+        cfg,
+        copper_cloud::cli::IntelligenceCommand::Set(copper_cloud::cli::IntelligenceSetArgs {
+            agent_max_turns: Some(0),
+            ..Default::default()
+        }),
+    )
+    .await
+    .is_err());
+    let cli_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM admin_audit
+         WHERE action = 'intelligence.update' AND detail ? 'agent' AND detail->>'via' = 'cli'",
+    )
+    .fetch_one(&s.state.db)
+    .await
+    .unwrap();
+    assert_eq!(cli_rows, 2);
 }

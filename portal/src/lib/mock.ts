@@ -357,11 +357,14 @@ const INTEL_DEFAULTS = {
   jev_endpoint: "https://api.typesafe.ai/v1/systemone",
   jev_model: "jev-latest",
   router_url: "https://llm.example.com",
+  agent_max_turns: 60,
 };
+const AGENT_MAX_TURNS = { min: 1, max: 500 };
 const intelligence: IntelligenceSettings = {
   enabled: true,
   jev: { key_last4: "x7Qa", endpoint: INTEL_DEFAULTS.jev_endpoint, model: "jev-latest" },
   router: null,
+  agent: null,
   updated_at: ago(2 * DAY),
   updated_by: "cli",
   defaults: INTEL_DEFAULTS,
@@ -636,8 +639,9 @@ function route(
       intelligence.jev = null;
       intelligence.router = null;
       intelligence.enabled = true;
-      intelligence.updated_at = null;
-      intelligence.updated_by = null;
+      // The agent budget is not a key: DELETE leaves it (and the row it lives on).
+      intelligence.updated_at = intelligence.agent ? nowIso : null;
+      intelligence.updated_by = intelligence.agent ? admin.email : null;
       record("intelligence.clear", "intelligence", { via: "admin_api" }, nowIso);
     } else if (method === "PUT") {
       const changed: Record<string, unknown> = { via: "admin_api" };
@@ -666,6 +670,24 @@ function route(
           url: r.url || intelligence.router?.url || INTEL_DEFAULTS.router_url,
         };
         changed.router = { ...intelligence.router };
+      }
+      if (body.agent === null) {
+        intelligence.agent = null;
+        changed.agent = null;
+      } else if (body.agent !== undefined) {
+        const n = (body.agent as { max_turns?: unknown }).max_turns;
+        if (
+          typeof n !== "number" ||
+          !Number.isInteger(n) ||
+          n < AGENT_MAX_TURNS.min ||
+          n > AGENT_MAX_TURNS.max
+        ) {
+          throw bad(
+            `agent max_turns must be an integer from ${AGENT_MAX_TURNS.min} to ${AGENT_MAX_TURNS.max}`,
+          );
+        }
+        intelligence.agent = { max_turns: n };
+        changed.agent = { max_turns: n };
       }
       if (typeof body.enabled === "boolean") {
         intelligence.enabled = body.enabled;

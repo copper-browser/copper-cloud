@@ -326,6 +326,15 @@ fn print_intelligence(s: &intelligence::Settings) {
         ),
         None => println!("router:   not set"),
     }
+    match s.agent_max_turns {
+        Some(n) => println!(
+            "agent:    {n} tool-call rounds per question (whole org; served even when sharing is off)"
+        ),
+        None => println!(
+            "agent:    not set (each Copper uses its own setting, default {})",
+            intelligence::DEFAULT_AGENT_MAX_TURNS
+        ),
+    }
     if let Some(at) = s.updated_at {
         println!(
             "updated:  {} by {}",
@@ -336,7 +345,7 @@ fn print_intelligence(s: &intelligence::Settings) {
 }
 
 pub async fn intelligence(cfg: Config, cmd: IntelligenceCommand) -> anyhow::Result<()> {
-    use intelligence::{Change, JevInput, RouterInput, Update};
+    use intelligence::{AgentInput, Change, JevInput, RouterInput, Update};
 
     // Read key files before touching the database (fail fast, stdin read once).
     let update = match &cmd {
@@ -375,21 +384,28 @@ pub async fn intelligence(cfg: Config, cmd: IntelligenceCommand) -> anyhow::Resu
             } else {
                 Change::Keep
             };
+            let agent = a.agent_max_turns.map_or(Change::Keep, |max_turns| {
+                Change::Set(AgentInput { max_turns })
+            });
             let u = Update {
                 jev,
                 router,
+                agent,
                 enabled: None,
             };
             if u.is_noop() {
-                bail!("nothing to set: pass --jev-key-file and/or --router-key-file (or a URL/model to change)");
+                bail!("nothing to set: pass --jev-key-file, --router-key-file and/or --agent-max-turns (or a URL/model to change)");
             }
             Some(u)
         }
-        IntelligenceCommand::Clear { jev, router } if *jev || *router => Some(Update {
-            jev: if *jev { Change::Clear } else { Change::Keep },
-            router: if *router { Change::Clear } else { Change::Keep },
-            enabled: None,
-        }),
+        IntelligenceCommand::Clear { jev, router, agent } if *jev || *router || *agent => {
+            Some(Update {
+                jev: if *jev { Change::Clear } else { Change::Keep },
+                router: if *router { Change::Clear } else { Change::Keep },
+                agent: if *agent { Change::Clear } else { Change::Keep },
+                enabled: None,
+            })
+        }
         IntelligenceCommand::Enable => Some(Update {
             enabled: Some(true),
             ..Update::default()
@@ -416,7 +432,7 @@ pub async fn intelligence(cfg: Config, cmd: IntelligenceCommand) -> anyhow::Resu
                     if removed {
                         "cleared"
                     } else {
-                        "nothing was set"
+                        "no keys were set"
                     }
                 );
                 intelligence::load(&pool, &crypto).await.map_err(api)?

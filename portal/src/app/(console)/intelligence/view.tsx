@@ -27,7 +27,7 @@ export function IntelligenceView() {
     <>
       <PageHeader
         title="AI keys"
-        description="Set the Jev and LLM router keys once. Every signed-in Copper on this instance picks them up, so nobody pastes keys by hand."
+        description="Set the Jev and LLM router keys once. Every signed-in Copper on this instance picks them up, so nobody pastes keys by hand. The agent round limit below applies org-wide too."
       />
       {intel.error && !data ? (
         <LoadError error={intel.error} onRetry={intel.reload} />
@@ -36,12 +36,14 @@ export function IntelligenceView() {
           <Skeleton className="h-[74px] w-full rounded-lg" />
           <Skeleton className="h-40 w-full rounded-lg" />
           <Skeleton className="h-40 w-full rounded-lg" />
+          <Skeleton className="h-24 w-full rounded-lg" />
         </div>
       ) : (
         <>
           <SharingSection intel={intel} data={data} />
           <JevSection intel={intel} data={data} />
           <RouterSection intel={intel} data={data} />
+          <AgentSection intel={intel} data={data} />
         </>
       )}
     </>
@@ -382,6 +384,101 @@ function RouterSection({ intel, data }: { intel: Intel; data: IntelligenceSettin
           />
         }
       />
+    </Section>
+  );
+}
+
+const AGENT_MIN_TURNS = 1;
+const AGENT_MAX_TURNS = 500;
+
+function AgentSection({ intel, data }: { intel: Intel; data: IntelligenceSettings }) {
+  const stored = data.agent?.max_turns;
+  const [value, setValue] = useState(stored === undefined ? "" : String(stored));
+  const [error, setError] = useState<string>();
+  const [pending, setPending] = useState(false);
+  const id = useId();
+  const fallback = data.defaults.agent_max_turns;
+
+  async function put(maxTurns: number | null) {
+    setPending(true);
+    const ok = await save(
+      intel,
+      { agent: maxTurns === null ? null : { max_turns: maxTurns } },
+      maxTurns === null
+        ? "Agent round limit cleared"
+        : `Agent round limit set to ${maxTurns}`,
+    );
+    setPending(false);
+    if (ok) setValue(maxTurns === null ? "" : String(maxTurns));
+  }
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (pending) return;
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setError(undefined);
+      if (stored !== undefined) await put(null);
+      return;
+    }
+    const n = Number(trimmed);
+    if (!/^\d+$/.test(trimmed) || n < AGENT_MIN_TURNS || n > AGENT_MAX_TURNS) {
+      setError(`Use a whole number from ${AGENT_MIN_TURNS} to ${AGENT_MAX_TURNS}.`);
+      return;
+    }
+    setError(undefined);
+    await put(n);
+  }
+
+  return (
+    <Section
+      id="agent-title"
+      title="Agent"
+      description="How many rounds of tool calls Copper's agent may run for one question before it stops and asks you to continue. Applies to everyone, whether or not keys are shared."
+    >
+      <form onSubmit={submit} className="grid gap-4" noValidate>
+        <div className="grid content-start gap-1.5">
+          <Label htmlFor={id}>Tool-call rounds per question (whole org)</Label>
+          <Input
+            id={id}
+            type="number"
+            inputMode="numeric"
+            min={AGENT_MIN_TURNS}
+            max={AGENT_MAX_TURNS}
+            step={1}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder={String(fallback)}
+            className="@xl:max-w-[180px]"
+            aria-invalid={error ? true : undefined}
+            aria-describedby={`${id}-hint`}
+          />
+          <p
+            id={`${id}-hint`}
+            className={cn(
+              "text-xs",
+              error ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {error ?? `Blank = each person's own Copper setting (default ${fallback}).`}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button type="submit" disabled={pending}>
+            {pending ? "Saving…" : "Save"}
+          </Button>
+          {stored !== undefined && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending}
+              onClick={() => void put(null)}
+            >
+              Clear
+            </Button>
+          )}
+        </div>
+      </form>
     </Section>
   );
 }

@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 or from a release tarball:
 
 ```sh
-tar xzf copper-cloud-0.6.0-linux-x86_64.tar.gz && sudo ./install.sh
+tar xzf copper-cloud-0.7.0-linux-x86_64.tar.gz && sudo ./install.sh
 ```
 
 The installer sets up Postgres (unless you pass `DATABASE_URL`), a `copper-cloud` system user,
@@ -89,7 +89,7 @@ on `127.0.0.1:9464`. Every config key can be overridden with `COPPER_CLOUD_<KEY>
 | `copper-cloud admin users\|create-user\|reset-password\|delete-user\|disable-user\|enable-user\|disable-signup\|enable-signup` | user administration |
 | `copper-cloud admin create-admin\|reset-admin-password\|list-admins\|delete-admin` | portal admin accounts |
 | `copper-cloud admin access-mode\|set-access-mode open\|directory\|create-access-key` | who may pass the gate |
-| `copper-cloud intelligence set\|show\|clear\|enable\|disable` | cloud-wide Jev + LLM router keys every signed-in Copper receives (keys from files/stdin, shown masked) |
+| `copper-cloud intelligence set\|show\|clear\|enable\|disable` | cloud-wide Jev + LLM router keys every signed-in Copper receives (keys from files/stdin, shown masked), plus the org-wide agent round budget (`--agent-max-turns`, `clear --agent`) |
 | `copper-cloud version` | version |
 
 All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`, env
@@ -105,7 +105,7 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
   encryption at rest, TLS pinning
 - [Install](docs/install.md) — VM one-liner, manual install, configuration reference
 - [Operations](docs/operations.md) — doctor, logs, metrics, backups, upgrades
-- [v0.6.0 release notes](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
+- [v0.7.0 release notes](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
 
 ## Development
 
