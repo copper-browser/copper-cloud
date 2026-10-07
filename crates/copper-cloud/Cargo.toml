@@ -4,7 +4,12 @@ description = "Self-hosted sync + collaborative canvas server for the Copper bro
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
 rust-version.workspace = true
+publish = false
 default-run = "copper-cloud"
 build = "build.rs"
 

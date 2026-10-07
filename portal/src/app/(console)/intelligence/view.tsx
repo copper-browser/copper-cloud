@@ -363,6 +363,10 @@ function RouterSection({ intel, data }: { intel: Intel; data: IntelligenceSettin
           toast.success("Router key removed");
         }}
         onSave={async (key) => {
+          if (!url.trim() && !data.router) {
+            setError("Enter your gateway's base URL.");
+            return false;
+          }
           if (url.trim() && !isUrl(url)) {
             setError("Use an http(s):// URL.");
             return false;
@@ -379,7 +383,7 @@ function RouterSection({ intel, data }: { intel: Intel; data: IntelligenceSettin
             label="Router URL"
             value={url}
             onChange={setUrl}
-            placeholder={data.defaults.router_url}
+            placeholder="https://llm.example.com"
             error={error}
           />
         }

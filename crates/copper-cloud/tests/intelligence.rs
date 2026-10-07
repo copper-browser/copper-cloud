@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 
 const JEV_KEY: &str = "jev-test-key-0123456789-JEVK";
 const ROUTER_KEY: &str = "sk-router-test-key-9876543210-RTRK";
+const ROUTER_URL: &str = "https://router.example.com";
 
 async fn json_of(r: reqwest::Response) -> Value {
     r.json().await.unwrap()
@@ -66,9 +67,12 @@ async fn intelligence_keys_end_to_end() {
         .unwrap();
     assert_eq!(r.status(), 403);
 
-    // Validation: a new block needs a key; URLs must be http(s); unknown fields rejected.
+    // Validation: a new block needs a key (and a router a URL: there is no built-in default);
+    // URLs must be http(s); unknown fields rejected.
     for bad in [
         json!({ "jev": { "endpoint": "https://x.example.com" } }),
+        json!({ "router": { "key": ROUTER_KEY } }),
+        json!({ "router": { "key": ROUTER_KEY, "url": "  " } }),
         json!({ "router": { "key": ROUTER_KEY, "url": "ftp://x" } }),
         json!({ "router": { "key": "short" } }),
         json!({ "jev": { "key": JEV_KEY, "nope": 1 } }),
@@ -83,10 +87,14 @@ async fn intelligence_keys_end_to_end() {
         assert_eq!(r.status(), 400, "{bad}");
     }
 
-    // Set both; defaults fill endpoint/model/url. The admin only sees the last 4 chars.
+    // Set both; defaults fill the Jev endpoint/model, the router URL is explicit. The admin
+    // only sees the last 4 chars.
     let r = s
         .admin(Method::PUT, "intelligence", Some(&c))
-        .json(&json!({ "jev": { "key": JEV_KEY }, "router": { "key": ROUTER_KEY } }))
+        .json(&json!({
+            "jev": { "key": JEV_KEY },
+            "router": { "key": ROUTER_KEY, "url": ROUTER_URL },
+        }))
         .send()
         .await
         .unwrap();
@@ -102,8 +110,9 @@ async fn intelligence_keys_end_to_end() {
     assert_eq!(v["jev"]["endpoint"], "https://api.typesafe.ai/v1/systemone");
     assert_eq!(v["jev"]["model"], "jev-latest");
     assert_eq!(v["router"]["key_last4"], "RTRK");
-    assert_eq!(v["router"]["url"], "https://llm.example.com");
+    assert_eq!(v["router"]["url"], ROUTER_URL);
     assert_eq!(v["updated_by"], ADMIN_EMAIL);
+    assert!(v["defaults"].get("router_url").is_none(), "{v}");
     let r = s
         .admin(Method::GET, "intelligence", Some(&c))
         .send()
@@ -138,10 +147,7 @@ async fn intelligence_keys_end_to_end() {
         v["jev"],
         json!({ "key": JEV_KEY, "endpoint": "https://api.typesafe.ai/v1/systemone", "model": "jev-latest" })
     );
-    assert_eq!(
-        v["router"],
-        json!({ "key": ROUTER_KEY, "url": "https://llm.example.com" })
-    );
+    assert_eq!(v["router"], json!({ "key": ROUTER_KEY, "url": ROUTER_URL }));
     let at = v["updated_at"].as_str().unwrap();
     assert!(
         time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).is_ok()
@@ -291,7 +297,7 @@ async fn intelligence_works_with_access_keys_and_survives_wrong_master_key() {
             router: copper_cloud_core::intelligence::Change::Set(
                 copper_cloud_core::intelligence::RouterInput {
                     key: Some(ROUTER_KEY.into()),
-                    url: None,
+                    url: Some(ROUTER_URL.into()),
                 },
             ),
             ..Default::default()
@@ -407,7 +413,7 @@ async fn agent_max_turns_is_org_wide_and_independent_of_keys() {
     );
 
     // Keys set alongside; an absent "agent" keeps the budget.
-    let r = put(json!({ "router": { "key": ROUTER_KEY } })).await;
+    let r = put(json!({ "router": { "key": ROUTER_KEY, "url": ROUTER_URL } })).await;
     assert_eq!(json_of(r).await["agent"]["max_turns"], 100);
     let v = user_view().await;
     assert_eq!(v["router"]["key"], ROUTER_KEY);
@@ -524,4 +530,80 @@ async fn agent_max_turns_is_org_wide_and_independent_of_keys() {
     .await
     .unwrap();
     assert_eq!(cli_rows, 2);
+}
+
+/// Upgrades must not touch a router URL an instance already stores (including one that used
+/// to come from a built-in default): rotating the key or toggling sharing keeps it, and a new
+/// router block without a URL is refused instead of silently pointing at someone's gateway.
+#[tokio::test]
+async fn configured_router_url_is_preserved_and_never_defaulted() {
+    use copper_cloud_core::intelligence::{self as intel, Actor, Change, RouterInput, Update};
+    let s = start().await;
+    let ana = s.signup("ana@example.com", PASSWORD, &new_device()).await;
+    let set_router = |key: Option<&str>, url: Option<&str>| Update {
+        router: Change::Set(RouterInput {
+            key: key.map(str::to_owned),
+            url: url.map(str::to_owned),
+        }),
+        ..Default::default()
+    };
+
+    // Nothing stored + no URL → 400, nothing written.
+    let Err(err) = intel::apply(
+        &s.state.db,
+        &s.state.crypto,
+        &Actor::Cli,
+        &set_router(Some(ROUTER_KEY), None),
+    )
+    .await
+    else {
+        panic!("a router key without a URL is refused");
+    };
+    assert_eq!(err.status(), 400);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM intelligence_settings")
+        .fetch_one(&s.state.db)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+
+    // An instance configured with its own gateway (as any pre-0.8.1 instance is: the URL lives
+    // in the row, not in the binary).
+    let configured = "https://gateway.example.org";
+    intel::apply(
+        &s.state.db,
+        &s.state.crypto,
+        &Actor::Cli,
+        &set_router(Some(ROUTER_KEY), Some(configured)),
+    )
+    .await
+    .unwrap();
+
+    // Key rotation with no URL keeps the stored one; so does a blank URL and a sharing toggle.
+    let rotated = "sk-router-rotated-key-1111111111-ROT2";
+    for update in [
+        set_router(Some(rotated), None),
+        set_router(None, Some("")),
+        Update {
+            enabled: Some(false),
+            ..Default::default()
+        },
+        Update {
+            enabled: Some(true),
+            ..Default::default()
+        },
+    ] {
+        let got = intel::apply(&s.state.db, &s.state.crypto, &Actor::Cli, &update)
+            .await
+            .unwrap();
+        assert_eq!(got.router.as_ref().unwrap().url, configured);
+    }
+    let v: Value = s
+        .authed(Method::GET, "/v1/intelligence", &ana)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["router"], json!({ "key": rotated, "url": configured }));
 }

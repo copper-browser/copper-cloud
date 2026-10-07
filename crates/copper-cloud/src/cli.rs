@@ -109,7 +109,8 @@ pub struct IntelligenceSetArgs {
     /// File holding the LLM router (LiteLLM) key; "-" reads stdin.
     #[arg(long, value_name = "FILE")]
     pub router_key_file: Option<PathBuf>,
-    /// Router base URL (default https://llm.example.com).
+    /// Router base URL, e.g. https://llm.example.com. Required the first time a router key is
+    /// set (there is no default); later calls keep the stored URL unless this is given.
     #[arg(long, value_name = "URL")]
     pub router_url: Option<String>,
     /// Org-wide tool-call rounds per question for Copper's agent (1-500); overrides each

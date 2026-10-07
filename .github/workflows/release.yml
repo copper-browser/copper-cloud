@@ -9,6 +9,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Explicit worker cap for every cargo invocation (build jobs).
+  CARGO_BUILD_JOBS: 4
 
 jobs:
   build:
@@ -52,11 +54,11 @@ jobs:
         with:
           version: 0.14.1
       - name: Install cargo-zigbuild
-        run: cargo install --locked cargo-zigbuild
+        run: cargo install --locked -j4 cargo-zigbuild
       - name: Build (glibc 2.28 baseline)
         env:
           COPPER_CLOUD_GIT_SHA: ${{ github.sha }}
-        run: cargo zigbuild --release --locked -p copper-cloud --target ${{ matrix.target }}.2.28
+        run: cargo zigbuild --release --locked -j4 -p copper-cloud --target ${{ matrix.target }}.2.28
       - name: Package
         run: |
           name="copper-cloud-${VERSION}-linux-${{ matrix.arch }}"
@@ -66,10 +68,11 @@ jobs:
           cp install.sh "$stage/install.sh"
           cp packaging/copper-cloud.service "$stage/packaging/copper-cloud.service"
           cp README.md "$stage/README.md"
+          cp LICENSE "$stage/LICENSE"
           chmod 0755 "$stage/copper-cloud" "$stage/install.sh"
           file "$stage/copper-cloud"
           # Files at the archive root: `tar xzf … && sudo ./install.sh`.
-          tar -C "$stage" -czf "dist/$name.tar.gz" copper-cloud install.sh packaging README.md
+          tar -C "$stage" -czf "dist/$name.tar.gz" copper-cloud install.sh packaging README.md LICENSE
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           cat "dist/$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v4

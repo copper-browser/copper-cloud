@@ -153,7 +153,7 @@ redirect — check the code). `new` shorter than 10 chars → `400`.
 
 ```json
 {
-  "version": "0.8.0 (abc1234)",
+  "version": "0.8.1 (abc1234)",
   "uptime_s": 86400,
   "access_mode": "directory",
   "allow_signup": true,
@@ -230,7 +230,6 @@ Settings object (`GET`, `PUT` and `DELETE` responses):
   "defaults": {
     "jev_endpoint": "https://api.typesafe.ai/v1/systemone",
     "jev_model": "jev-latest",
-    "router_url": "https://llm.example.com",
     "agent_max_turns": 60
   }
 }
@@ -243,6 +242,8 @@ Settings object (`GET`, `PUT` and `DELETE` responses):
 * `agent`: `{"max_turns": N}` with N in 1–500, or `null` when the org sets no budget (each
   Copper then uses its own setting). `defaults.agent_max_turns` is Copper's own default (60),
   shown as a hint.
+* `defaults` has no router URL: there is no built-in gateway (0.8.1+; older servers sent a
+  `router_url` hint).
 * `updated_by`: admin email, or `"cli"` for `copper-cloud intelligence …`; `null` when unset.
 
 ### `GET /admin/api/intelligence`
@@ -265,7 +266,9 @@ The settings object.
 * A missing block is left unchanged; `"jev": null` / `"router": null` removes that block.
 * Inside a block every field is optional: a missing (or empty) `endpoint` / `model` / `url`
   keeps the stored value, or takes the default for a new block; a missing `key` keeps the
-  stored key (required when the block is new). So `{"router": {"url": "https://…"}}` moves
+  stored key (required when the block is new). The router has **no default URL**: a new
+  `router` block needs both `key` and `url` (`400` otherwise); afterwards the stored URL is
+  kept until a new one is given. So `{"router": {"url": "https://…"}}` moves
   the gateway without re-entering the key.
 * Keys: 8–4096 printable ASCII characters, no spaces (surrounding whitespace is trimmed).
   URLs: `http://` or `https://` with a host, ≤ 2048 characters; a trailing `/` is dropped.

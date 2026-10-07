@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -12,6 +13,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Explicit worker cap for every cargo invocation (build jobs and test threads below).
+  CARGO_BUILD_JOBS: 4
 
 jobs:
   lint:
@@ -26,7 +29,7 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -j4 -- -D warnings
       - name: shellcheck install.sh
         run: shellcheck -s sh install.sh
       - name: install.sh embedded unit matches packaging/copper-cloud.service
@@ -74,10 +77,10 @@ jobs:
             echo "no portal/package.json; the binary serves the 'portal not built' page"
           fi
       - name: cargo test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -j4 -- --test-threads=4
       - name: CLI smoke test
         run: |
-          cargo run --locked -q -- init-config --write "$RUNNER_TEMP/cc.toml" \
+          cargo run --locked -j4 -q -- init-config --write "$RUNNER_TEMP/cc.toml" \
             --database-url postgres://localhost:5432/copper_cloud_test_core
-          cargo run --locked -q -- --config "$RUNNER_TEMP/cc.toml" tls-init
-          cargo run --locked -q -- --config "$RUNNER_TEMP/cc.toml" link-code | grep -q '^copper-cloud://localhost:8443/#k='
+          cargo run --locked -j4 -q -- --config "$RUNNER_TEMP/cc.toml" tls-init
+          cargo run --locked -j4 -q -- --config "$RUNNER_TEMP/cc.toml" link-code | grep -q '^copper-cloud://localhost:8443/#k='

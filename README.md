@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 or from a release tarball:
 
 ```sh
-tar xzf copper-cloud-0.8.0-linux-x86_64.tar.gz && sudo ./install.sh
+tar xzf copper-cloud-0.8.1-linux-x86_64.tar.gz && sudo ./install.sh
 ```
 
 The installer sets up Postgres (unless you pass `DATABASE_URL`), a `copper-cloud` system user,
@@ -106,7 +106,8 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
   encryption at rest, TLS pinning
 - [Install](docs/install.md) — VM one-liner, manual install, configuration reference
 - [Operations](docs/operations.md) — doctor, logs, metrics, backups, upgrades
-- [v0.8.0 release notes](docs/v0.8.0.md) · [v0.7.0](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
+- [Onboarding a team](docs/onboarding.md) — issuing link codes, people, keeping links valid
+- [v0.8.1 release notes](docs/v0.8.1.md) · [v0.8.0](docs/v0.8.0.md) · [v0.7.0](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
 
 ## Development
 
@@ -132,4 +133,4 @@ container. Releases: push a
 
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -356,7 +356,6 @@ const settings: Omit<Settings, "instance_link_code"> = {
 const INTEL_DEFAULTS = {
   jev_endpoint: "https://api.typesafe.ai/v1/systemone",
   jev_model: "jev-latest",
-  router_url: "https://llm.example.com",
   agent_max_turns: 60,
 };
 const AGENT_MAX_TURNS = { min: 1, max: 500 };
@@ -665,9 +664,11 @@ function route(
       } else if (body.router) {
         const r = body.router as { key?: string; url?: string };
         if (!r.key && !intelligence.router) throw bad("router key is required");
+        const url = r.url?.trim() || intelligence.router?.url;
+        if (!url) throw bad("router url is required");
         intelligence.router = {
           key_last4: r.key ? last4(r.key) : intelligence.router!.key_last4,
-          url: r.url || intelligence.router?.url || INTEL_DEFAULTS.router_url,
+          url,
         };
         changed.router = { ...intelligence.router };
       }

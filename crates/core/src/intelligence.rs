@@ -30,7 +30,9 @@ use crate::state::SharedState;
 
 pub const DEFAULT_JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 pub const DEFAULT_JEV_MODEL: &str = "jev-latest";
-pub const DEFAULT_ROUTER_URL: &str = "https://llm.example.com";
+// There is deliberately no default router URL: every instance runs its own gateway, so the
+// admin must name it explicitly the first time a router key is stored. A stored URL is kept
+// across later key rotations (see `merge_router`).
 
 /// Copper's own agent round budget when the org sets none (shown to the admin as a hint).
 pub const DEFAULT_AGENT_MAX_TURNS: i32 = 60;
@@ -183,7 +185,6 @@ impl Settings {
             "defaults": {
                 "jev_endpoint": DEFAULT_JEV_ENDPOINT,
                 "jev_model": DEFAULT_JEV_MODEL,
-                "router_url": DEFAULT_ROUTER_URL,
                 "agent_max_turns": DEFAULT_AGENT_MAX_TURNS,
             },
         })
@@ -299,7 +300,8 @@ pub struct JevInput {
     pub model: Option<String>,
 }
 
-/// New router values; `None` fields keep the stored value (or take the default).
+/// New router values; `None` fields keep the stored value. There is no default URL: a new
+/// router block needs both `key` and `url`.
 #[derive(Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouterInput {
@@ -464,7 +466,11 @@ fn merge_router(current: Option<&RouterKey>, input: &RouterInput) -> ApiResult<R
     let url = match (&input.url, current) {
         (Some(u), _) if !u.trim().is_empty() => clean_url(u, "router url")?,
         (_, Some(c)) => c.url.clone(),
-        _ => DEFAULT_ROUTER_URL.to_owned(),
+        _ => {
+            return Err(ApiError::bad_request(
+                "router url is required (the base URL of your OpenAI-compatible gateway)",
+            ))
+        }
     };
     Ok(RouterKey { key, url })
 }
@@ -741,6 +747,44 @@ mod tests {
     }
 
     #[test]
+    fn router_url_is_required_for_a_new_block_and_kept_after() {
+        let input = |key: Option<&str>, url: Option<&str>| RouterInput {
+            key: key.map(str::to_owned),
+            url: url.map(str::to_owned),
+        };
+        // New block: no built-in default URL.
+        for url in [None, Some(""), Some("   ")] {
+            let Err(err) = merge_router(None, &input(Some("sk-router-0123456789"), url)) else {
+                panic!("a new router block needs a URL");
+            };
+            assert_eq!(err.status(), 400);
+        }
+        let r = merge_router(
+            None,
+            &input(
+                Some("sk-router-0123456789"),
+                Some("https://llm.example.com/"),
+            ),
+        )
+        .unwrap();
+        assert_eq!(r.url, "https://llm.example.com");
+        // Existing block: a key rotation (or blank URL) keeps the configured URL.
+        let current = RouterKey {
+            key: "sk-router-0123456789".into(),
+            url: "https://gateway.example.net".into(),
+        };
+        for url in [None, Some("")] {
+            let r =
+                merge_router(Some(&current), &input(Some("sk-router-rotated-9876"), url)).unwrap();
+            assert_eq!(r.url, "https://gateway.example.net");
+            assert_eq!(r.key, "sk-router-rotated-9876");
+        }
+        // The admin view advertises no router default.
+        let masked = Settings::default().masked_view();
+        assert!(masked["defaults"].get("router_url").is_none(), "{masked}");
+    }
+
+    #[test]
     fn agent_input_json() {
         let ok: Change<AgentInput> = serde_json::from_value(json!({ "max_turns": 100 })).unwrap();
         assert!(matches!(ok, Change::Set(AgentInput { max_turns: 100 })));
@@ -826,7 +870,7 @@ mod tests {
         let off = Settings {
             router: Some(RouterKey {
                 key: "sk-router-0123456789".into(),
-                url: DEFAULT_ROUTER_URL.into(),
+                url: "https://llm.example.com".into(),
             }),
             enabled: false,
             agent_max_turns: Some(100),

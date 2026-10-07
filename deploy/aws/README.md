@@ -22,10 +22,12 @@ You can run all of these scripts from any directory, and running them again is s
 |---|---|---|
 | AWS CLI v2 | Terraform credentials, SSM reads | `aws sso login` (set `AWS_PROFILE` if you're not using the default profile) |
 | Terraform ≥ 1.6 (or OpenTofu) | infrastructure | `brew install hashicorp/tap/terraform`, or set `TERRAFORM=tofu` |
-| GitHub CLI | downloads the release tarball | `gh auth login` (needs read access to `copper-browser/copper-cloud`) |
+| GitHub CLI | downloads the release tarball | `gh auth login` (releases of `copper-browser/copper-cloud` are public; set `COPPER_CLOUD_REPO=owner/repo` to use a fork) |
 | session-manager-plugin (optional) | shell on the VM | `brew install --cask session-manager-plugin` |
 
-Terraform deploys into whichever AWS account your credentials (`AWS_PROFILE`) resolve to; the default region is `us-east-1`.
+Terraform deploys into whichever AWS account your current credentials resolve to (check with
+`aws sts get-caller-identity`) and defaults to `us-east-1` (`--region` or `AWS_REGION` to
+change it). Nothing in this directory names a particular account.
 
 ## `up.sh` options
 
@@ -109,7 +111,7 @@ terraform output -state=state/demo/terraform.tfstate
 ## N instances in parallel
 
 ```bash
-for n in alpha beta gamma; do ./deploy/aws/up.sh "$n" --release v0.8.0 > "/tmp/up-$n.log" 2>&1 & done; wait
+for n in alpha beta gamma; do ./deploy/aws/up.sh "$n" --release v0.8.1 > "/tmp/up-$n.log" 2>&1 & done; wait
 ```
 
 Each name gets its own RDS instance, bucket, IAM role, SGs, EIP and SSM path. Check the account

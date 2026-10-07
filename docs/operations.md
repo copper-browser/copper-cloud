@@ -7,7 +7,7 @@ sudo copper-cloud doctor
 ```
 
 ```
-copper-cloud doctor (0.8.0)
+copper-cloud doctor (0.8.1)
   ok    config      /etc/copper-cloud/copper-cloud.toml
   ok    database    PostgreSQL 16.4 (postgres://copper_cloud:***@127.0.0.1:5432/copper_cloud)
   ok    migrations  7 applied, none pending
@@ -206,9 +206,9 @@ files or stdin — never argv):
 ```sh
 umask 077
 sudo copper-cloud intelligence set --jev-key-file /root/jev.key --router-key-file /root/router.key \
-    [--router-url https://llm.example.com] \
+    --router-url https://llm.example.com \
     [--jev-endpoint https://api.typesafe.ai/v1/systemone] [--jev-model jev-latest]
-sudo copper-cloud intelligence set --router-key-file - < router.key   # "-" = stdin
+sudo copper-cloud intelligence set --router-key-file - < router.key   # "-" = stdin; keeps the stored URL
 sudo copper-cloud intelligence set --router-url https://llm.example.com  # keeps the stored key
 sudo copper-cloud intelligence show        # masked: last 4 characters only
 sudo copper-cloud intelligence disable     # keep the keys, stop handing them out
@@ -220,7 +220,9 @@ shred -u /root/jev.key /root/router.key
 ```
 
 Defaults for a new block: Jev endpoint `https://api.typesafe.ai/v1/systemone`, model
-`jev-latest`, router URL `https://llm.example.com`. Changes are audited (`intelligence.*` in
+`jev-latest`. The router has no default URL: the first `--router-key-file` needs
+`--router-url` (your OpenAI-compatible gateway's base URL); later key rotations keep the stored
+URL. Changes are audited (`intelligence.*` in
 the portal's activity log). Anyone who can sign in can use the keys — give each instance its
 own budget-capped router key (e.g. a dedicated LiteLLM virtual key) and rotate by setting a new
 one. The keys are sealed under the `master_key`; restoring a DB dump without it loses them (set

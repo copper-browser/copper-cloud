@@ -92,7 +92,7 @@ Key only (no session). Lets a client validate a link code before showing account
 ```json
 {
   "name": "copper-cloud",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "signup": true,
   "access_mode": "directory",
   "features": ["history_delete"],

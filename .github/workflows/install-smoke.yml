@@ -1,0 +1,166 @@
+name: Install smoke
+
+# Anonymous end-to-end check of the public one-liner on fresh, disposable GitHub-hosted
+# Ubuntu runners: fetch main/install.sh with no GitHub credentials, install a published
+# release natively (systemd + the distribution's PostgreSQL; no Docker, no containers),
+# smoke the running service, then re-run the installer to prove the in-place upgrade keeps
+# the certificate, config and link code. Manual only; run it after a release is published.
+#
+# The raw installer output holds the generated admin password and the link code, so it is
+# written to a 0600 file in RUNNER_TEMP, never printed or uploaded. Only `==>`, `warning:`
+# and `error:` progress lines are echoed when a step fails.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release to install (e.g. 0.8.1)
+        required: true
+        default: "0.8.1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  install:
+    name: install ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      # Explicit worker cap: one disposable runner per architecture.
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    env:
+      VERSION: ${{ inputs.version }}
+      INSTALL_URL: https://raw.githubusercontent.com/copper-browser/copper-cloud/main/install.sh
+      PORT: "8443"
+      EXPECT_ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Validate inputs and platform
+        run: |
+          set -eu
+          VERSION=${VERSION#v}
+          printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' ||
+            { echo "::error::version must look like 0.8.1"; exit 1; }
+          echo "VERSION=$VERSION" >>"$GITHUB_ENV"
+          [ "$(uname -m)" = "$EXPECT_ARCH" ] || { echo "::error::runner is $(uname -m), expected $EXPECT_ARCH"; exit 1; }
+          if command -v docker >/dev/null 2>&1; then echo "docker present on the image; not used"; fi
+          . /etc/os-release && echo "runner: $PRETTY_NAME $(uname -m)"
+
+      - name: Fetch main/install.sh anonymously
+        run: |
+          set -eu
+          unset GITHUB_TOKEN GH_TOKEN
+          curl -fsSL --retry 3 --connect-timeout 15 "$INSTALL_URL" -o "$RUNNER_TEMP/install.sh"
+          head -n 1 "$RUNNER_TEMP/install.sh" | grep -qx '#!/bin/sh'
+          sh -n "$RUNNER_TEMP/install.sh"
+          echo "install.sh sha256 $(sha256sum "$RUNNER_TEMP/install.sh" | cut -d' ' -f1)"
+
+      - name: Install (fresh)
+        run: |
+          set -eu
+          unset GITHUB_TOKEN GH_TOKEN
+          log="$RUNNER_TEMP/install-1.log"
+          install -m 0600 /dev/null "$log"
+          # Same as the README one-liner (script on stdin, $0 = sh), with explicit inputs.
+          # shellcheck disable=SC2024 # stdin/log are the runner user's files on purpose
+          if ! sudo env -u GITHUB_TOKEN -u GH_TOKEN \
+              COPPER_CLOUD_VERSION="$VERSION" \
+              COPPER_CLOUD_PUBLIC_HOST=localhost \
+              COPPER_CLOUD_PORT="$PORT" \
+              COPPER_CLOUD_ADMIN_EMAIL=admin@example.com \
+              sh -s <"$RUNNER_TEMP/install.sh" >"$log" 2>&1; then
+            grep -E '^(==>|warning:|error:)' "$log" || true
+            echo "::error::installer failed (raw output kept private)"
+            exit 1
+          fi
+          grep -qx 'copper-cloud is running.' "$log" || { echo "::error::no success summary"; exit 1; }
+          grep -E '^==>' "$log"
+
+      - name: Smoke (fresh)
+        run: |
+          set -eu
+          systemctl is-active --quiet copper-cloud.service || { echo "::error::service not active"; exit 1; }
+          echo "service active: pass"
+          got=$(/usr/local/bin/copper-cloud version | awk '{print $2}')
+          [ "$got" = "$VERSION" ] || { echo "::error::installed version $got != $VERSION"; exit 1; }
+          echo "installed version $got: pass"
+          sudo /usr/local/bin/copper-cloud --config /etc/copper-cloud/copper-cloud.toml healthcheck --wait 30 >/dev/null
+          echo "pinned healthcheck: pass"
+          body=$(curl -fsSk --retry 5 --retry-connrefused "https://localhost:$PORT/healthz")
+          [ "$body" = ok ] || { echo "::error::/healthz returned unexpected body"; exit 1; }
+          echo "/healthz ok: pass"
+          code=$(curl -sSk -o "$RUNNER_TEMP/portal.html" -w '%{http_code}' "https://localhost:$PORT/")
+          [ "$code" = 200 ] || { echo "::error::portal returned HTTP $code"; exit 1; }
+          if ! grep -qi '<html' "$RUNNER_TEMP/portal.html" || grep -q 'portal was not built' "$RUNNER_TEMP/portal.html"; then
+            echo "::error::release binary does not serve the built portal"; exit 1
+          fi
+          echo "portal HTTP 200 (built): pass"
+
+      - name: Record state digests (private)
+        run: |
+          set -eu
+          install -m 0600 /dev/null "$RUNNER_TEMP/before.sha256"
+          # shellcheck disable=SC2024 # digest file is the runner user's (0600) on purpose
+          sudo sha256sum /etc/copper-cloud/tls/cert.pem /etc/copper-cloud/tls/key.pem \
+            /etc/copper-cloud/copper-cloud.toml /etc/copper-cloud/link-code \
+            /etc/copper-cloud/admin-credentials >"$RUNNER_TEMP/before.sha256"
+          echo "recorded $(wc -l <"$RUNNER_TEMP/before.sha256") digests"
+
+      - name: Re-run installer (in-place upgrade)
+        run: |
+          set -eu
+          unset GITHUB_TOKEN GH_TOKEN
+          log="$RUNNER_TEMP/install-2.log"
+          install -m 0600 /dev/null "$log"
+          # shellcheck disable=SC2024 # stdin/log are the runner user's files on purpose
+          if ! sudo env -u GITHUB_TOKEN -u GH_TOKEN \
+              COPPER_CLOUD_VERSION="$VERSION" \
+              COPPER_CLOUD_PUBLIC_HOST=localhost \
+              COPPER_CLOUD_PORT="$PORT" \
+              COPPER_CLOUD_ADMIN_EMAIL=admin@example.com \
+              sh -s <"$RUNNER_TEMP/install.sh" >"$log" 2>&1; then
+            grep -E '^(==>|warning:|error:)' "$log" || true
+            echo "::error::installer re-run failed (raw output kept private)"
+            exit 1
+          fi
+          grep -qx 'copper-cloud is running.' "$log" || { echo "::error::no success summary"; exit 1; }
+          grep -q '^==> keeping existing config' "$log" || { echo "::error::re-run did not keep the config"; exit 1; }
+          grep -q '^==> portal admin admin@example.com exists' "$log" || { echo "::error::re-run touched the admin"; exit 1; }
+          echo "re-run kept config and admin: pass"
+
+      - name: Verify upgrade kept state and health
+        run: |
+          set -eu
+          if sudo sha256sum --check --quiet --status "$RUNNER_TEMP/before.sha256"; then
+            echo "cert/key/config/link code/admin credentials unchanged: pass"
+          else
+            echo "::error::state digests changed across the re-run: fail"
+            exit 1
+          fi
+          systemctl is-active --quiet copper-cloud.service || { echo "::error::service not active after re-run"; exit 1; }
+          got=$(/usr/local/bin/copper-cloud version | awk '{print $2}')
+          [ "$got" = "$VERSION" ] || { echo "::error::version $got != $VERSION after re-run"; exit 1; }
+          sudo /usr/local/bin/copper-cloud --config /etc/copper-cloud/copper-cloud.toml healthcheck --wait 30 >/dev/null
+          body=$(curl -fsSk --retry 5 --retry-connrefused "https://localhost:$PORT/healthz")
+          [ "$body" = ok ] || { echo "::error::/healthz after re-run: fail"; exit 1; }
+          code=$(curl -sSk -o "$RUNNER_TEMP/portal.html" -w '%{http_code}' "https://localhost:$PORT/")
+          [ "$code" = 200 ] || { echo "::error::portal after re-run returned HTTP $code"; exit 1; }
+          grep -qi '<html' "$RUNNER_TEMP/portal.html" || { echo "::error::portal after re-run is not HTML"; exit 1; }
+          echo "post-upgrade service/version/health/portal: pass"
+
+      - name: Service diagnostics (on failure)
+        if: failure()
+        run: |
+          systemctl status --no-pager copper-cloud.service postgresql.service 2>&1 | grep -v -E 'k=|password' || true
+          sudo journalctl -u copper-cloud.service -n 40 --no-pager 2>&1 | grep -v -E 'k=|password' || true

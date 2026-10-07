@@ -117,7 +117,6 @@ export interface IntelligenceSettings {
   defaults: {
     jev_endpoint: string;
     jev_model: string;
-    router_url: string;
     /** Copper's own default when the org sets no budget. */
     agent_max_turns: number;
   };
