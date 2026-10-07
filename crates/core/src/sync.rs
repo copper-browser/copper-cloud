@@ -1,11 +1,19 @@
-//! Sync: last-writer-wins documents, append-only history, and the per-user SSE event stream.
+//! Sync: last-writer-wins documents, append-only history (which its owner may delete), and the
+//! per-user SSE event stream.
 //!
 //! Every query is scoped by the caller's `user_id`; payloads are sealed with the user's data
 //! key (AAD `"<user_id>:<domain>"`, history uses domain `history`).
+//!
+//! History deletes never open payloads: the server selects rows by metadata only (`seq`,
+//! `visited_at`, `device_id`); picking individual entries is done by the user on the client,
+//! which sends the chosen `seq`s. See "History delete" below.
 
 use std::borrow::Cow;
 use std::convert::Infallible;
 use std::io::Write as _;
+use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -16,17 +24,19 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures::Stream;
+use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::value::RawValue;
 use time::OffsetDateTime;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::auth::{AuthUser, KeyedUser};
 use crate::crypto::Crypto;
 use crate::error::{ApiError, ApiResult};
 use crate::events::Event;
-use crate::extract::{check_content_length, read_body};
+use crate::extract::{check_content_length, read_body, QueryParams};
 use crate::state::SharedState;
 
 /// Whole-document domains every client may read and write.
@@ -44,7 +54,12 @@ pub(crate) fn routes() -> Router<SharedState> {
     Router::new()
         .route("/sync/docs", get(list_docs))
         .route("/sync/docs/{domain}", get(get_doc).put(put_doc))
-        .route("/sync/history", get(pull_history).post(push_history))
+        .route(
+            "/sync/history",
+            get(pull_history)
+                .post(push_history)
+                .delete(delete_history_route),
+        )
         .route("/sync/events", get(events))
 }
 
@@ -569,6 +584,312 @@ async fn pull_history(
 }
 
 // ---------------------------------------------------------------------------------------------
+// History delete
+//
+// PRIVACY RULE: the server never inspects history to decide what to delete. Payloads are never
+// opened here — no `Crypto::open`, no data key (the route takes `AuthUser`, not `KeyedUser`).
+// Deletes select rows only by metadata the server already stores in the clear: the owner's
+// `user_id`, the row `seq`, `visited_at` and `device_id`. Choosing individual entries (a site,
+// a page, a search) is the *user's* decision and happens on the client: it pulls its history
+// (`GET /sync/history` returns every row's `seq`), filters locally, and sends the chosen `seqs`.
+// An admin can delete wholesale by the same metadata (time window, device), never by content.
+// Keep every code path in this section free of payload reads.
+
+/// Most `seqs` in one `DELETE /sync/history` body (`400` above it).
+pub const MAX_HISTORY_DELETE_SEQS: usize = 5000;
+/// Body cap for `DELETE /sync/history` (`413` above it): [`MAX_HISTORY_DELETE_SEQS`] seqs of
+/// up to 20 characters each plus separators, with room for whitespace.
+pub const HISTORY_DELETE_BODY_LIMIT: usize = 256 * 1024;
+/// `DELETE /sync/history` calls per user per minute (GCRA: bursts of this many, then one every
+/// `60 / n` s).
+pub const HISTORY_DELETES_PER_MINUTE: u32 = 20;
+
+/// A metadata-only history filter. Every set field narrows the selection; an empty filter
+/// selects all of the user's history.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HistoryFilter {
+    /// Only visits with `visited_at >= since`.
+    pub since: Option<OffsetDateTime>,
+    /// Only visits with `visited_at < until`.
+    pub until: Option<OffsetDateTime>,
+    /// Only rows pushed by this device.
+    pub device: Option<Uuid>,
+}
+
+impl HistoryFilter {
+    /// A validated filter: times in UTC, `since` earlier than `until`.
+    pub fn new(
+        since: Option<OffsetDateTime>,
+        until: Option<OffsetDateTime>,
+        device: Option<Uuid>,
+    ) -> ApiResult<Self> {
+        let utc = |t: OffsetDateTime| t.to_offset(time::UtcOffset::UTC);
+        let (since, until) = (since.map(utc), until.map(utc));
+        if let (Some(s), Some(u)) = (since, until) {
+            if s >= u {
+                return Err(ApiError::bad_request("since must be earlier than until"));
+            }
+        }
+        Ok(Self {
+            since,
+            until,
+            device,
+        })
+    }
+
+    /// No field set (selects everything).
+    pub fn is_empty(&self) -> bool {
+        self.since.is_none() && self.until.is_none() && self.device.is_none()
+    }
+
+    /// The `DELETE /sync/history` query: `since`, `until` and `device`, at most once each;
+    /// `token` (the `?token=` session form) is ignored; anything else is a `400`, so a misspelt
+    /// filter never widens a delete to everything.
+    fn from_query(pairs: &[(String, String)]) -> ApiResult<Self> {
+        fn once<T>(slot: &mut Option<T>, name: &str, value: T) -> ApiResult<()> {
+            if slot.replace(value).is_some() {
+                return Err(ApiError::bad_request(format!(
+                    "{name} may be given at most once"
+                )));
+            }
+            Ok(())
+        }
+        let (mut since, mut until, mut device) = (None, None, None);
+        for (key, value) in pairs {
+            match key.as_str() {
+                "since" => once(&mut since, "since", parse_history_time("since", value)?)?,
+                "until" => once(&mut until, "until", parse_history_time("until", value)?)?,
+                "device" => {
+                    let id = Uuid::parse_str(value.trim())
+                        .map_err(|_| ApiError::bad_request("device must be a device uuid"))?;
+                    once(&mut device, "device", id)?;
+                }
+                "token" => {}
+                other => {
+                    return Err(ApiError::bad_request(format!(
+                        "unknown query parameter `{}`; expected since, until or device \
+                         (pick individual entries with a {{\"seqs\": [...]}} body)",
+                        other.chars().take(64).collect::<String>()
+                    )))
+                }
+            }
+        }
+        Self::new(since, until, device)
+    }
+}
+
+/// An RFC 3339 timestamp from a query or CLI value, in UTC. An unencoded `+` offset arrives as
+/// a space (form decoding turns `+` into a space); it is put back.
+pub fn parse_history_time(name: &str, raw: &str) -> ApiResult<OffsetDateTime> {
+    use time::format_description::well_known::Rfc3339;
+    let raw = raw.trim();
+    OffsetDateTime::parse(raw, &Rfc3339)
+        .or_else(|_| OffsetDateTime::parse(&raw.replace(' ', "+"), &Rfc3339))
+        .map(|t| t.to_offset(time::UtcOffset::UTC))
+        .map_err(|_| {
+            ApiError::bad_request(format!(
+                "{name} must be an RFC 3339 timestamp, e.g. 2026-10-01T12:00:00Z"
+            ))
+        })
+}
+
+/// Which history rows a delete removes — always by metadata, never by payload content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HistorySelection {
+    /// Exactly these rows, which the user picked on their client (sorted, de-duplicated).
+    /// Seqs that do not exist or belong to someone else are ignored.
+    Seqs(Vec<i64>),
+    /// Every row matching the filter (all of the user's history when it is empty).
+    Filter(HistoryFilter),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteBody {
+    seqs: Vec<i64>,
+}
+
+/// The optional `DELETE /sync/history` body: none (empty or whitespace) → `None`; otherwise
+/// exactly `{"seqs": [<i64>, …]}` with at most [`MAX_HISTORY_DELETE_SEQS`] values (any other
+/// shape, field or `null` is a `400`, so a malformed body never turns into "delete
+/// everything"). Returned sorted and de-duplicated.
+fn parse_delete_body(bytes: &[u8]) -> ApiResult<Option<Vec<i64>>> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let body: DeleteBody = serde_json::from_slice(bytes).map_err(|e| {
+        ApiError::bad_request(format!(
+            "invalid JSON body: {e}; expected {{\"seqs\": [<seq>, ...]}} or no body"
+        ))
+    })?;
+    if body.seqs.len() > MAX_HISTORY_DELETE_SEQS {
+        return Err(ApiError::bad_request(format!(
+            "too many seqs: {} in one request; at most {MAX_HISTORY_DELETE_SEQS}",
+            body.seqs.len()
+        )));
+    }
+    let mut seqs = body.seqs;
+    seqs.sort_unstable();
+    seqs.dedup();
+    Ok(Some(seqs))
+}
+
+/// Delete `user_id`'s history rows chosen by `selection` (with `dry_run`, only count them).
+/// One statement, scoped to `user_id`, selecting by `seq` / `visited_at` / `device_id` only —
+/// payloads are never read (see the privacy rule above). Deleting never renumbers anything, so
+/// pull cursors stay valid.
+pub async fn delete_history(
+    db: &sqlx::PgPool,
+    user_id: Uuid,
+    selection: &HistorySelection,
+    dry_run: bool,
+) -> ApiResult<u64> {
+    let count = |n: i64| u64::try_from(n).unwrap_or(0);
+    Ok(match selection {
+        HistorySelection::Seqs(seqs) if seqs.is_empty() => 0,
+        HistorySelection::Seqs(seqs) if dry_run => count(
+            sqlx::query_scalar("SELECT count(*) FROM history WHERE user_id = $1 AND seq = ANY($2)")
+                .bind(user_id)
+                .bind(seqs)
+                .fetch_one(db)
+                .await?,
+        ),
+        HistorySelection::Seqs(seqs) => {
+            sqlx::query("DELETE FROM history WHERE user_id = $1 AND seq = ANY($2)")
+                .bind(user_id)
+                .bind(seqs)
+                .execute(db)
+                .await?
+                .rows_affected()
+        }
+        HistorySelection::Filter(f) if dry_run => count(
+            sqlx::query_scalar(
+                "SELECT count(*) FROM history
+                 WHERE user_id = $1
+                   AND ($2::timestamptz IS NULL OR visited_at >= $2)
+                   AND ($3::timestamptz IS NULL OR visited_at < $3)
+                   AND ($4::uuid IS NULL OR device_id = $4)",
+            )
+            .bind(user_id)
+            .bind(f.since)
+            .bind(f.until)
+            .bind(f.device)
+            .fetch_one(db)
+            .await?,
+        ),
+        HistorySelection::Filter(f) => sqlx::query(
+            "DELETE FROM history
+                 WHERE user_id = $1
+                   AND ($2::timestamptz IS NULL OR visited_at >= $2)
+                   AND ($3::timestamptz IS NULL OR visited_at < $3)
+                   AND ($4::uuid IS NULL OR device_id = $4)",
+        )
+        .bind(user_id)
+        .bind(f.since)
+        .bind(f.until)
+        .bind(f.device)
+        .execute(db)
+        .await?
+        .rows_affected(),
+    })
+}
+
+struct DeleteLimiter {
+    limiter: DefaultKeyedRateLimiter<Uuid>,
+    calls: AtomicU64,
+}
+
+static DELETE_LIMITER: LazyLock<DeleteLimiter> = LazyLock::new(|| DeleteLimiter {
+    limiter: RateLimiter::keyed(Quota::per_minute(
+        NonZeroU32::new(HISTORY_DELETES_PER_MINUTE).expect("non-zero"),
+    )),
+    calls: AtomicU64::new(0),
+});
+
+/// `true` if `user` may delete history now (process-wide, per user).
+fn allow_delete(user: Uuid) -> bool {
+    let l = &*DELETE_LIMITER;
+    if l.calls.fetch_add(1, Ordering::Relaxed) % 4096 == 4095 {
+        l.limiter.retain_recent();
+        l.limiter.shrink_to_fit();
+    }
+    l.limiter.check_key(&user).is_ok()
+}
+
+/// `DELETE /sync/history[?since=&until=&device=]` with an optional `{"seqs": [...]}` body →
+/// `{"deleted": n}`, then a `history_deleted` event on the user's streams. Seqs and query
+/// filters are mutually exclusive; neither = all of the caller's history. Takes `AuthUser`
+/// (no data key): nothing here can open a payload.
+async fn delete_history_route(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    QueryParams(pairs): QueryParams<Vec<(String, String)>>,
+    req: Request,
+) -> ApiResult<Json<serde_json::Value>> {
+    let filter = HistoryFilter::from_query(&pairs)?;
+    drop(pairs);
+    check_content_length(&req, HISTORY_DELETE_BODY_LIMIT)?;
+    let bytes = read_body(req.into_body(), HISTORY_DELETE_BODY_LIMIT).await?;
+    let seqs = parse_delete_body(&bytes)?;
+    drop(bytes);
+    let selection = match seqs {
+        Some(_) if !filter.is_empty() => {
+            return Err(ApiError::bad_request(
+                "give either seqs in the body or since/until/device in the query, not both",
+            ))
+        }
+        Some(seqs) => HistorySelection::Seqs(seqs),
+        None => HistorySelection::Filter(filter),
+    };
+    let user_id = user.user_id;
+    if !allow_delete(user_id) {
+        metrics::counter!("history_delete_rate_limited_total").increment(1);
+        tracing::warn!(%user_id, "history delete rate limit exceeded");
+        return Err(ApiError::RateLimited);
+    }
+    let device_id = user.device_id;
+    // Finish even if the client goes away mid-delete, so the event always goes out with what
+    // was actually removed.
+    let task = tokio::spawn(
+        async move {
+            let deleted = delete_history(&state.db, user_id, &selection, false).await?;
+            metrics::counter!("history_deleted").increment(deleted);
+            let seqs = match &selection {
+                HistorySelection::Seqs(seqs) => Some(u64::try_from(seqs.len()).unwrap_or(0)),
+                HistorySelection::Filter(_) => None,
+            };
+            let f = match selection {
+                HistorySelection::Filter(f) => f,
+                HistorySelection::Seqs(_) => HistoryFilter::default(),
+            };
+            tracing::info!(
+                deleted,
+                seqs,
+                since = f.since.is_some(),
+                until = f.until.is_some(),
+                device = f.device.is_some(),
+                "history deleted"
+            );
+            state.events.publish(
+                user_id,
+                Event::HistoryDeleted {
+                    deleted,
+                    since: f.since,
+                    until: f.until,
+                    device: f.device,
+                    seqs,
+                    device_id: Some(device_id),
+                },
+            );
+            Ok::<_, ApiError>(deleted)
+        }
+        .in_current_span(),
+    );
+    let deleted = task.await??;
+    Ok(Json(json!({ "deleted": deleted })))
+}
+
+// ---------------------------------------------------------------------------------------------
 // Events (SSE)
 
 struct SubscriberGauge;
@@ -719,6 +1040,117 @@ mod tests {
         );
         assert_eq!(reason(r#"{"visited_at":"soon"}"#), "bad_visited_at");
         assert_eq!(reason(r#"{"visited_at":1e300}"#), "bad_visited_at");
+    }
+
+    #[test]
+    fn delete_query_parsing() {
+        let q = |pairs: &[(&str, &str)]| {
+            let pairs: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            HistoryFilter::from_query(&pairs)
+        };
+        assert_eq!(q(&[]).unwrap(), HistoryFilter::default());
+        assert!(q(&[]).unwrap().is_empty());
+        assert!(q(&[("token", "ignored")]).unwrap().is_empty());
+        let f = q(&[
+            ("since", "2026-10-01T12:00:00Z"),
+            // Form decoding turned an unencoded `+` into a space.
+            ("until", "2026-10-01T14:00:01 02:00"),
+            ("device", "00000000-0000-0000-0000-000000000001"),
+            ("token", "ignored"),
+        ])
+        .unwrap();
+        assert!(!f.is_empty());
+        assert_eq!(f.since.unwrap().unix_timestamp(), 1_790_856_000);
+        assert_eq!(f.until.unwrap().unix_timestamp(), 1_790_856_000 + 1);
+        assert_eq!(f.until.unwrap().offset(), time::UtcOffset::UTC);
+        assert_eq!(f.device, Some(Uuid::from_u128(1)));
+
+        let err = |pairs: &[(&str, &str)]| match q(pairs) {
+            Err(ApiError::BadRequest(msg)) => msg,
+            other => panic!("{pairs:?}: {other:?}"),
+        };
+        // Content filters do not exist: the server never looks inside history to delete.
+        assert!(err(&[("host", "x.com")]).contains("unknown query parameter `host`"));
+        assert!(err(&[("url", "https://x.com")]).contains("unknown query parameter"));
+        assert!(err(&[("seqs", "1,2")]).contains("unknown query parameter"));
+        assert!(err(&[("since", "yesterday")]).contains("RFC 3339"));
+        assert!(err(&[("until", "")]).contains("RFC 3339"));
+        assert!(err(&[("since", "1790856000")]).contains("RFC 3339"));
+        assert!(err(&[
+            ("since", "2026-10-01T12:00:00Z"),
+            ("since", "2026-10-01T13:00:00Z")
+        ])
+        .contains("at most once"));
+        assert!(err(&[
+            ("since", "2026-10-01T12:00:00Z"),
+            ("until", "2026-10-01T12:00:00Z")
+        ])
+        .contains("earlier than until"));
+        assert!(err(&[("device", "me")]).contains("uuid"));
+    }
+
+    /// Guard for the privacy rule: no code (comments aside) in the history-delete section may
+    /// open a payload or take a data key.
+    #[test]
+    fn history_delete_never_opens_payloads() {
+        let src = include_str!("sync.rs");
+        let start = src.find("\n// History delete\n").expect("section start");
+        let end = start
+            + src[start..]
+                .find("\n// Events (SSE)\n")
+                .expect("section end");
+        let code: Vec<&str> = src[start..end]
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or_default())
+            .collect();
+        assert!(code.iter().any(|l| l.contains("async fn delete_history(")));
+        for line in code {
+            for banned in ["Crypto", "KeyedUser", "data_key", "open(", "payload"] {
+                assert!(!line.contains(banned), "{banned} in: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn delete_body_parsing() {
+        let p = |s: &str| parse_delete_body(s.as_bytes());
+        assert_eq!(p("").unwrap(), None);
+        assert_eq!(p(" \n\t").unwrap(), None);
+        assert_eq!(p(r#"{"seqs":[]}"#).unwrap(), Some(vec![]));
+        assert_eq!(p(r#"{"seqs":[9,3,9,-1,3]}"#).unwrap(), Some(vec![-1, 3, 9]));
+        let max: Vec<i64> = (1..=i64::try_from(MAX_HISTORY_DELETE_SEQS).unwrap()).collect();
+        let body = json!({ "seqs": max }).to_string();
+        assert!(body.len() < HISTORY_DELETE_BODY_LIMIT / 2);
+        assert_eq!(p(&body).unwrap().unwrap().len(), MAX_HISTORY_DELETE_SEQS);
+        // Anything else is a 400 — never "delete everything".
+        for bad in [
+            "{}",
+            "null",
+            "[]",
+            "[1,2]",
+            r#"{"seqs":null}"#,
+            r#"{"seqs":"1,2"}"#,
+            r#"{"seqs":[1.5]}"#,
+            r#"{"seqs":["1"]}"#,
+            r#"{"seqs":[99999999999999999999]}"#,
+            r#"{"seq":[1]}"#,
+            r#"{"seqs":[1],"host":"x.com"}"#,
+            "not json",
+        ] {
+            assert!(
+                matches!(p(bad), Err(ApiError::BadRequest(_))),
+                "{bad}: {:?}",
+                p(bad)
+            );
+        }
+        let over: Vec<i64> = (0..=i64::try_from(MAX_HISTORY_DELETE_SEQS).unwrap()).collect();
+        match p(&json!({ "seqs": over }).to_string()) {
+            Err(ApiError::BadRequest(msg)) => assert!(msg.contains("too many seqs"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -269,6 +269,49 @@ pub enum AdminCommand {
         #[arg(long)]
         max_uses: Option<i32>,
     },
+    /// A user's synced browsing history.
+    #[command(subcommand)]
+    History(HistoryCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HistoryCommand {
+    /// Delete a user's synced history wholesale: all of it, or only the visits matching every
+    /// metadata filter given (time window, device). Never reads history content; picking
+    /// individual entries is up to the user in Copper. Prints the count only. Coppers keep their
+    /// local history and see fewer rows on their next pull.
+    Delete(HistoryDeleteArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HistoryDeleteArgs {
+    /// The user: email or user id.
+    #[arg(long, value_name = "EMAIL|UUID")]
+    pub user: String,
+    /// Only visits at or after this time (RFC 3339, e.g. 2026-10-01T00:00:00Z).
+    #[arg(long, value_name = "RFC3339", value_parser = parse_time)]
+    pub since: Option<time::OffsetDateTime>,
+    /// Only visits before this time (RFC 3339).
+    #[arg(long, value_name = "RFC3339", value_parser = parse_time)]
+    pub until: Option<time::OffsetDateTime>,
+    /// Only rows synced from this device id.
+    #[arg(long, value_name = "UUID")]
+    pub device: Option<uuid::Uuid>,
+    /// Only count what would be deleted.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+fn parse_time(s: &str) -> Result<time::OffsetDateTime, String> {
+    copper_cloud_core::sync::parse_history_time("the value", s).map_err(bad_value)
+}
+
+#[allow(clippy::needless_pass_by_value)] // used as `map_err(bad_value)`
+fn bad_value(e: copper_cloud_core::error::ApiError) -> String {
+    match e {
+        copper_cloud_core::error::ApiError::BadRequest(msg) => msg,
+        other => other.to_string(),
+    }
 }
 
 #[derive(Args, Debug)]
@@ -571,6 +614,54 @@ mod tests {
             "--router"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn admin_history_delete_flags() {
+        let cli = Cli::try_parse_from([
+            "copper-cloud",
+            "admin",
+            "history",
+            "delete",
+            "--user",
+            "ada@example.com",
+            "--since",
+            "2026-10-01T00:00:00Z",
+            "--until",
+            "2026-10-02T00:00:00+02:00",
+            "--device",
+            "00000000-0000-0000-0000-000000000001",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Some(Command::Admin(AdminCommand::History(HistoryCommand::Delete(a)))) = cli.command
+        else {
+            panic!("parsed as {:?}", cli.command);
+        };
+        assert_eq!(a.user, "ada@example.com");
+        assert_eq!(a.since.unwrap().unix_timestamp(), 1_790_812_800);
+        assert_eq!(a.until.unwrap().unix_timestamp(), 1_790_812_800 + 79_200);
+        assert_eq!(a.device, Some(uuid::Uuid::from_u128(1)));
+        assert!(a.dry_run);
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["copper-cloud", "admin", "history", "delete"];
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args)
+        };
+        assert!(parse(&["--user", "a@b.co"]).is_ok());
+        assert!(parse(&[]).is_err(), "--user is required");
+        for bad in [
+            ["--since", "yesterday"],
+            ["--until", "1790812800"],
+            // No content filters: the server never inspects history to delete.
+            ["--host", "x.com"],
+            ["--url", "https://x.com"],
+            ["--device", "me"],
+        ] {
+            let mut args = vec!["--user", "a@b.co"];
+            args.extend_from_slice(&bad);
+            assert!(parse(&args).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

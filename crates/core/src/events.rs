@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use time::OffsetDateTime;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -25,6 +26,23 @@ pub enum Event {
     },
     /// New history rows exist up to and including `seq`.
     History { seq: i64 },
+    /// History rows were deleted (`DELETE /v1/sync/history`) at the request of `device_id`.
+    /// Metadata only — never urls, hosts or any other history content. `deleted` = rows removed
+    /// on the server. For a filter delete, `since` / `until` (RFC 3339 UTC) and `device` echo
+    /// the filter (`null` = unbounded / every device) so other devices can apply it to their
+    /// local history; for a delete by seq they are `null` and `seqs` is how many distinct seqs
+    /// were asked for (omitted for filter deletes).
+    HistoryDeleted {
+        deleted: u64,
+        #[serde(with = "time::serde::rfc3339::option")]
+        since: Option<OffsetDateTime>,
+        #[serde(with = "time::serde::rfc3339::option")]
+        until: Option<OffsetDateTime>,
+        device: Option<Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seqs: Option<u64>,
+        device_id: Option<Uuid>,
+    },
     /// Something about a canvas changed (`kind` e.g. `created`, `renamed`, `deleted`,
     /// `invited` (new invite or a re-send reminder), `invite_revoked`, `invite_declined`,
     /// `member_added`, `member_removed`, `update`, `mention` (you were @mentioned in the
@@ -39,6 +57,7 @@ impl Event {
         match self {
             Self::Doc { .. } => "doc",
             Self::History { .. } => "history",
+            Self::HistoryDeleted { .. } => "history_deleted",
             Self::Canvas { .. } => "canvas",
         }
     }
@@ -141,6 +160,31 @@ mod tests {
         assert_eq!(
             s,
             r#"{"type":"doc","domain":"spaces","version":3,"device_id":null}"#
+        );
+        let ev = Event::HistoryDeleted {
+            deleted: 4,
+            since: Some(time::macros::datetime!(2026-10-01 12:00 UTC)),
+            until: None,
+            device: None,
+            seqs: None,
+            device_id: Some(Uuid::nil()),
+        };
+        assert_eq!(ev.name(), "history_deleted");
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"type":"history_deleted","deleted":4,"since":"2026-10-01T12:00:00Z","until":null,"device":null,"device_id":"00000000-0000-0000-0000-000000000000"}"#
+        );
+        let ev = Event::HistoryDeleted {
+            deleted: 2,
+            since: None,
+            until: None,
+            device: None,
+            seqs: Some(3),
+            device_id: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"type":"history_deleted","deleted":2,"since":null,"until":null,"device":null,"seqs":3,"device_id":null}"#
         );
     }
 }

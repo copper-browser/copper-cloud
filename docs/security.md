@@ -124,7 +124,9 @@ rustls only (ring provider), TLS 1.2+ with rustls' safe defaults; HTTP/2 or HTTP
 ### Authorization
 
 Every query that touches user data is filtered by the authenticated `user_id` (docs, history,
-devices, sessions). `tabs:<device_id>` docs are writable only by the owning device. Canvas
+devices, sessions); that includes history deletes, which also refuse unknown query parameters
+and malformed bodies so a typo cannot widen a delete to all of the caller's history.
+`tabs:<device_id>` docs are writable only by the owning device. Canvas
 access is checked per membership by the canvas crate. Share-link preview and join routes require
 an active session; disabled accounts have no valid sessions and cannot use links. Link joins are
 serialized on the link row, use the membership primary key for idempotency, and never replace an
@@ -185,6 +187,13 @@ canvas doc_key ──AES-256-GCM(aad "copper-cloud/v1/mention:" ‖ mention id)�
   in memory, raw key bytes are zeroized after derivation.
 - What is *not* encrypted: emails, display names, device names, timestamps, sizes, versions,
   domain names, history `visited_at`, canvas names, chat message ids and who mentioned whom. These are needed for indexing/ordering.
+- **The server never inspects history to decide what to delete.** `DELETE /v1/sync/history` and
+  `admin history delete` select rows only by metadata stored in the clear — `seq`,
+  `visited_at`, device — and never open a payload or unwrap a data key. Picking individual
+  entries (a site, a page) is the user's choice and is made on their client, which sends the
+  chosen seqs; an admin can only delete wholesale by time window and/or device. Logs carry
+  counts only; the `history_deleted` event (to the user's own devices) carries the metadata
+  filter or a seq count, never urls or hosts.
 
 **Back up the master key separately from database backups.** Losing it makes all synced data
 unrecoverable; leaking it together with a DB dump exposes everything.

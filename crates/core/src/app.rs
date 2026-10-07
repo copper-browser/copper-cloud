@@ -28,6 +28,13 @@ pub const PAIR_PATH: &str = "/v1/auth/pair";
 /// The admin login route (rate limited with its own per-IP bucket).
 pub const ADMIN_LOGIN_PATH: &str = "/admin/api/login";
 
+/// Optional capabilities advertised in `GET /v1/info` `features`, so clients can show or hide
+/// controls on older servers. Only ever grows.
+pub const FEATURES: &[&str] = &[
+    // `DELETE /v1/sync/history` (0.8.0).
+    "history_delete",
+];
+
 /// Core `/v1` routes (auth, pairing, devices, sync, intelligence, info). Paths are relative to `/v1`.
 pub fn router() -> Router<SharedState> {
     Router::new()
@@ -94,6 +101,7 @@ async fn info(
         "version": env!("CARGO_PKG_VERSION"),
         "signup": signup,
         "access_mode": mode,
+        "features": FEATURES,
         "limits": {
             "max_blob_bytes": state.cfg.limits.max_blob_bytes,
             "max_history_batch": state.cfg.limits.max_history_batch,

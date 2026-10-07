@@ -52,7 +52,7 @@ Always `{"error": "<code>", "message": "<text>"}`:
 | 404 | `link_not_found` | unknown, revoked, or deleted-canvas share link |
 | 409 | `conflict` | email taken; stale `base_version` (body carries the server copy) |
 | 413 | `payload_too_large` | body or payload over the configured limit |
-| 429 | `rate_limited` | auth rate limit (header `Retry-After: 60`) |
+| 429 | `rate_limited` | auth rate limit, or a per-user limit (mentions, history delete) (header `Retry-After: 60`) |
 | 500 | `internal` | server bug / database failure (details only in server logs) |
 
 ### Rate limit
@@ -62,7 +62,9 @@ is limited to `limits.auth_per_minute` (default 10) requests per minute per clie
 per /64), GCRA (bursts of 10, then one every 6 s). This includes the ungated
 `POST /v1/auth/pair`. Admin login has its own bucket of the same size.
 Behind a proxy set `trust_proxy = true` so the right-most `X-Forwarded-For` hop is used.
-`POST /v1/canvases/{id}/mentions` has its own per-user bucket (60 per minute, bursts of 60).
+`POST /v1/canvases/{id}/mentions` has its own per-user bucket (60 per minute, bursts of 60), and
+`DELETE /v1/sync/history` another (20 per minute, bursts of 20; requests rejected with `400` or
+`413` do not count).
 
 ### Request size limits
 
@@ -71,6 +73,7 @@ Behind a proxy set `trust_proxy = true` so the right-most `X-Forwarded-For` hop 
 | auth / devices | 16 KiB |
 | `PUT /v1/sync/docs/{domain}` | base64 of `limits.max_blob_bytes` (8 MB decoded) + 4 KiB |
 | `POST /v1/sync/history` | `max_history_batch` × (`max_history_entry_bytes` + 8) (≤ 64 MiB) |
+| `DELETE /v1/sync/history` | 256 KiB (room for 5000 `seqs`) |
 
 Bodies must arrive within 60 s. `Content-Type` is not required.
 
@@ -89,9 +92,10 @@ Key only (no session). Lets a client validate a link code before showing account
 ```json
 {
   "name": "copper-cloud",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "signup": true,
   "access_mode": "directory",
+  "features": ["history_delete"],
   "limits": { "max_blob_bytes": 8000000, "max_history_batch": 2000, "max_history_entry_bytes": 16384 }
 }
 ```
@@ -100,6 +104,13 @@ Key only (no session). Lets a client validate a link code before showing account
 credential**: always `true` with an access key (an email-bound key still needs its email; an
 exhausted key still gets `403 access_key_exhausted`); with the instance key, `allow_signup`
 (always `true` while the instance has no users). `access_mode` is `"open"` or `"directory"`.
+
+`features` (0.8.0+) lists optional capabilities so a client can show or hide controls; it
+only ever grows, and an absent field (older servers) means none of them:
+
+| Feature | Since | Means |
+|---|---|---|
+| `history_delete` | 0.8.0 | [`DELETE /v1/sync/history`](#delete-v1synchistory) and the `history_deleted` event |
 
 ---
 
@@ -331,8 +342,9 @@ Payload base64 may be standard or url-safe, padded or not.
 
 ## History 🔒
 
-Append-only. Each entry is a client-defined JSON object (e.g. `url`, `title`, `visited_at`,
-`transition`); the server stores it encrypted and returns it verbatim.
+Append-only for syncing; the owner can delete rows (`DELETE`, 0.8.0). Each entry is a
+client-defined JSON object (e.g. `url`, `title`, `visited_at`, `transition`); the server stores
+it encrypted and returns it verbatim.
 
 ### `POST /v1/sync/history`
 
@@ -387,7 +399,71 @@ Append-only. Each entry is a client-defined JSON object (e.g. `url`, `title`, `v
 }
 ```
 
-Loop with `since = next` while `more` is `true`; store `next` as the cursor.
+Loop with `since = next` while `more` is `true`; store `next` as the cursor. Deleted rows are
+simply absent: sequence numbers are never reused or renumbered, so a stored cursor stays valid
+after any delete (the next page just has fewer rows, and `next` never moves backwards).
+
+### `DELETE /v1/sync/history`
+
+Deletes the caller's own synced history. **The server never looks inside history to decide what
+to delete**: it selects rows only by metadata it stores in the clear (`seq`, `visited_at`, the
+pushing device), never by url, host, title or any other payload content. Picking individual
+entries — "forget this site", "remove these visits" — is the user's choice and is done on the
+client: pull the history (every `GET` row carries its `seq`), filter locally, and send the
+chosen seqs.
+
+Exactly one of three forms:
+
+| Form | Request | Deletes |
+|---|---|---|
+| By seq | body `{"seqs": [<seq>, …]}` (≤ 5000), no query parameters | exactly those rows, where they are the caller's; other users' or unknown seqs are silently ignored |
+| By metadata | no body; any of `since`, `until`, `device` in the query | rows matching **every** parameter given |
+| Everything | no body, no parameters | all of the caller's history, from every device |
+
+| Query parameter | Value | Selects |
+|---|---|---|
+| `since` | RFC 3339 | visits with `visited_at >= since` |
+| `until` | RFC 3339 | visits with `visited_at < until` |
+| `device` | device UUID | rows pushed by that device |
+
+```http
+DELETE /v1/sync/history
+Content-Type: application/json
+
+{ "seqs": [1201, 1202, 1240] }
+```
+
+```http
+DELETE /v1/sync/history?since=2026-10-01T00:00:00Z&until=2026-10-02T00:00:00Z
+```
+
+- Other users' rows are never touched, whatever the form.
+- `seqs` may be in any order and contain duplicates; `{"seqs": []}` deletes nothing (it never
+  means "everything"). An empty or whitespace-only body counts as no body.
+- Encode `+` in an offset as `%2B` (`2026-10-01T14:00:00%2B02:00`) or use `Z`; an unencoded
+  `+` (decoded as a space) is accepted too.
+- One SQL statement; a delete that has started finishes even if the client disconnects, and
+  repeating it is harmless.
+
+`200`:
+
+```json
+{ "deleted": 12 }
+```
+
+Then every stream of the user (the caller's too) gets a `history_deleted` event, even when
+`deleted` is `0` (see [Events](#events-sse-)).
+
+Errors (all `{"error": "bad_request", "message": …}` unless noted):
+
+- `400` — more than 5000 `seqs`; `seqs` **and** `since`/`until`/`device` together (ambiguous);
+  a body that is not exactly `{"seqs": [<integer>, …]}` (`{}`, `null`, `{"seqs": null}`, an
+  unknown field, a non-integer seq); an unparsable `since`/`until`/`device`; `since` not
+  earlier than `until`; a parameter given twice; or **any other query parameter** (`host`,
+  `url`, …), so a typo never widens a delete to everything (`token` — the `?token=` session form
+  — is allowed).
+- `413 payload_too_large` — body over 256 KiB.
+- `401` without a session; `429 rate_limited` beyond 20 deletes per minute per user.
 
 ---
 
@@ -407,6 +483,12 @@ data: {"type":"doc","domain":"spaces","version":8,"device_id":"…"}
 event: history
 data: {"type":"history","seq":1240}
 
+event: history_deleted
+data: {"type":"history_deleted","deleted":12,"since":"2026-10-01T00:00:00Z","until":null,"device":null,"device_id":"…"}
+
+event: history_deleted
+data: {"type":"history_deleted","deleted":3,"since":null,"until":null,"device":null,"seqs":3,"device_id":"…"}
+
 event: canvas
 data: {"type":"canvas","canvas_id":"…","kind":"created"}
 
@@ -417,6 +499,13 @@ data: {"skipped":12}
 ```
 
 - `doc.device_id` is the writer — ignore your own writes.
+- `history_deleted` (0.8.0) follows every successful `DELETE /v1/sync/history`. Metadata only —
+  never urls, hosts or other history content. `deleted` = rows removed on the server;
+  `device_id` = the device that asked. A delete by metadata echoes its filter so other devices
+  can apply it to their local history: `since` / `until` (RFC 3339 UTC, `null` = unbounded) and
+  `device` (`null` = every device); `seqs` is omitted. A delete by seq has `since` / `until` /
+  `device` `null` and `seqs` = how many distinct seqs were asked for. Deletes made with the
+  admin CLI send no event.
 - `resync`: this stream fell behind and dropped events; do a full pull
   (`GET /v1/sync/docs` + history from your cursor).
 - A `: keepalive` comment every 15 s. The stream ends on server shutdown, when the session is

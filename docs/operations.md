@@ -7,7 +7,7 @@ sudo copper-cloud doctor
 ```
 
 ```
-copper-cloud doctor (0.7.0)
+copper-cloud doctor (0.8.0)
   ok    config      /etc/copper-cloud/copper-cloud.toml
   ok    database    PostgreSQL 16.4 (postgres://copper_cloud:***@127.0.0.1:5432/copper_cloud)
   ok    migrations  7 applied, none pending
@@ -61,12 +61,15 @@ by `"…"`:
 
 5xx are logged at `error` with the internal error chain. Skipped history entries (see
 `POST /v1/sync/history`) log one `history entries skipped` warning per request with the count
-and the first index/reason. Useful filters:
+and the first index/reason. `DELETE /v1/sync/history` logs one `history deleted` line with the
+count deleted, how many seqs were asked for, and which filters were used (never the times,
+seqs or anything about the entries). Useful filters:
 
 ```sh
 journalctl -u copper-cloud -o cat | jq -c 'select(.level=="ERROR")'
 journalctl -u copper-cloud -o cat | jq -c 'select(.span.status==400) | .span | {path, user_id, error_message}'
 journalctl -u copper-cloud -o cat | jq -c 'select(.message=="history entries skipped")'
+journalctl -u copper-cloud -o cat | jq -c 'select(.message=="history deleted")'
 journalctl -u copper-cloud -o cat | jq -c 'select(.span.status==429)'
 journalctl -u copper-cloud -o cat | jq -c 'select(.message=="login failed")'
 ```
@@ -90,6 +93,8 @@ curl -s http://127.0.0.1:9464/metrics
 | `sync_doc_bytes` | histogram | — (plaintext size of accepted doc writes) |
 | `history_rows` | counter | — (entries appended) |
 | `history_rejected` | counter | — (entries skipped as invalid; the rest of their batch is stored) |
+| `history_deleted` | counter | — (entries deleted by their owner, `DELETE /v1/sync/history`) |
+| `history_delete_rate_limited_total` | counter | — (`DELETE /v1/sync/history` refused with `429`) |
 | `sse_subscribers` | gauge | — (open event streams) |
 | `auth_rate_limited_total` | counter | — |
 | `db_pool_size`, `db_pool_idle` | gauge | — (refreshed on scrape) |
@@ -150,6 +155,26 @@ sudo copper-cloud admin enable-signup
 ```
 
 `--password` also works but lands in shell history; prefer `--password-stdin`.
+
+### Synced history
+
+People delete their own synced history from Copper (`DELETE /v1/sync/history`); choosing
+*which* entries (a site, some visits) is theirs alone and happens in Copper, which sends the
+rows' seqs. An admin can only delete wholesale, by metadata — everything, a `visited_at` window,
+and/or one device — never by looking at what the history contains. `--user` takes an email or a
+user id; filters combine:
+
+```sh
+sudo copper-cloud admin history delete --user ada@example.com --dry-run            # count all
+sudo copper-cloud admin history delete --user ada@example.com \
+    --since 2026-10-01T00:00:00Z --until 2026-10-02T00:00:00Z [--device <uuid>]
+sudo copper-cloud admin history delete --user 0192…                                # everything
+```
+
+It prints only the count (`--dry-run` only counts) — never any history content. No payload is
+opened and no data key is unwrapped. There is no confirmation prompt — dry-run first. Running
+servers are not told (no `history_deleted` event); Coppers keep their local history and see
+fewer rows on their next pull.
 
 ### Admin portal
 

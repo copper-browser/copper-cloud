@@ -84,12 +84,17 @@ Every user-owned row cascades from `users`, so `admin delete-user` removes every
   $base` / `INSERT … ON CONFLICT DO NOTHING` — single statement, no lost updates), otherwise
   returns `409` with the current server copy for the client to merge.
 - `tabs:<device_id>` docs are writable only by that device's sessions.
-- **History** is append-only; `seq` gives a total order per instance and is the pull cursor.
-  Batches are inserted with one `INSERT … SELECT FROM UNNEST(…)`.
+- **History** is append-only for syncing; `seq` gives a total order per instance and is the pull
+  cursor. Batches are inserted with one `INSERT … SELECT FROM UNNEST(…)`. The owner can delete
+  rows (`DELETE /v1/sync/history`, 0.8.0) with one `DELETE` that selects by metadata only — a
+  list of `seq`s the client picked from its own pull, or a `visited_at` window and/or device —
+  and never opens a payload (the route does not even unwrap the data key). `seq` is never
+  reused, so cursors survive deletes.
 - **Events**: an in-process per-user `tokio::sync::broadcast` fan-out (`Events`). Doc writes
-  publish `doc`, history appends publish `history`, the canvas crate publishes `canvas`. SSE
-  streams turn them into `event:` frames with a 15 s keepalive comment; a lagging stream gets
-  `resync`. Single-process by design (one daemon per instance).
+  publish `doc`, history appends publish `history`, history deletes publish `history_deleted`,
+  the canvas crate publishes `canvas`. SSE streams turn them into `event:` frames with a 15 s
+  keepalive comment; a lagging stream gets `resync`. Single-process by design (one daemon per
+  instance).
 
 ## Encryption at rest
 

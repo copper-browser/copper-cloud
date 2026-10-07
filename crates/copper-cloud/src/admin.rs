@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use copper_cloud_core::intelligence;
 
-use crate::cli::{AdminCommand, IntelligenceCommand};
+use crate::cli::{AdminCommand, HistoryCommand, HistoryDeleteArgs, IntelligenceCommand};
 
 pub async fn run(cfg: Config, cmd: AdminCommand) -> anyhow::Result<()> {
     let pool = db::connect(&cfg).await?;
@@ -255,8 +255,55 @@ async fn dispatch(cfg: &Config, pool: &sqlx::PgPool, cmd: AdminCommand) -> anyho
                 Err(err) => eprintln!("(no link code: {err:#})"),
             }
         }
+        AdminCommand::History(HistoryCommand::Delete(args)) => {
+            // Counts only: never print history content.
+            let (email, n) = history_delete(pool, &args).await?;
+            let entries = format!("{n} history {}", if n == 1 { "entry" } else { "entries" });
+            if args.dry_run {
+                println!("dry run: would delete {entries} of {email}");
+            } else {
+                println!("deleted {entries} of {email}");
+            }
+        }
     }
     Ok(())
+}
+
+/// `admin history delete`: resolves `--user` (email or id) and deletes or, with `--dry-run`,
+/// counts their history rows matching the metadata filter (`--since` / `--until` /
+/// `--device`; none = everything). Wholesale only: no payload is opened and no data key is
+/// unwrapped. Returns the user's email and the count. Running servers do not learn about it
+/// (no `history_deleted` event); Coppers see fewer rows on their next pull.
+pub async fn history_delete(
+    pool: &sqlx::PgPool,
+    args: &HistoryDeleteArgs,
+) -> anyhow::Result<(String, u64)> {
+    use copper_cloud_core::sync::{HistoryFilter, HistorySelection};
+    let filter = HistoryFilter::new(args.since, args.until, args.device).map_err(api)?;
+    let row: Option<(Uuid, String)> = match Uuid::parse_str(args.user.trim()) {
+        Ok(id) => {
+            sqlx::query_as("SELECT id, email FROM users WHERE id = $1")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+        }
+        Err(_) => {
+            sqlx::query_as("SELECT id, email FROM users WHERE lower(email) = lower($1)")
+                .bind(args.user.trim())
+                .fetch_optional(pool)
+                .await?
+        }
+    };
+    let (user_id, email) = row.with_context(|| format!("no user {}", args.user))?;
+    let n = copper_cloud_core::sync::delete_history(
+        pool,
+        user_id,
+        &HistorySelection::Filter(filter),
+        args.dry_run,
+    )
+    .await
+    .map_err(api)?;
+    Ok((email, n))
 }
 
 fn fmt_time(t: OffsetDateTime) -> String {

@@ -79,6 +79,14 @@ pub fn install_metrics() -> anyhow::Result<PrometheusHandle> {
         "history_rejected",
         "History entries skipped as invalid (the rest of their batch is stored)"
     );
+    metrics::describe_counter!(
+        "history_deleted",
+        "History entries deleted by their owner (DELETE /v1/sync/history)"
+    );
+    metrics::describe_counter!(
+        "history_delete_rate_limited_total",
+        "DELETE /v1/sync/history calls refused by the per-user rate limit"
+    );
     metrics::describe_gauge!("sse_subscribers", "Open /v1/sync/events streams");
     metrics::describe_gauge!("db_pool_size", "Postgres pool connections (open)");
     metrics::describe_gauge!("db_pool_idle", "Postgres pool connections (idle)");
