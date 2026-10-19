@@ -81,6 +81,7 @@ pub fn router() -> Router<SharedState> {
         .route("/integrations/{id}", delete(revoke_integration))
         .route("/integrations/{id}/rotate", post(rotate_integration))
         .route("/integrations/{id}/devices", get(integration_devices))
+        .merge(crate::admin_addons::router())
         .fallback(copper_cloud_core::app::not_found)
         .layer(from_fn(guard))
 }

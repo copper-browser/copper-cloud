@@ -49,6 +49,9 @@ pub enum Event {
     /// canvas chat), `mention_read` (your mentions there were marked read, e.g. on another
     /// device)).
     Canvas { canvas_id: Uuid, kind: String },
+    /// Addons changed on this instance (admin upload / enable / audience / settings / delete);
+    /// refetch `GET /v1/addons` with the last revision. Sent to every connected user.
+    Addons,
 }
 
 impl Event {
@@ -59,6 +62,7 @@ impl Event {
             Self::History { .. } => "history",
             Self::HistoryDeleted { .. } => "history_deleted",
             Self::Canvas { .. } => "canvas",
+            Self::Addons => "addons",
         }
     }
 }
@@ -107,6 +111,13 @@ impl Events {
         rx
     }
 
+    /// Deliver `ev` to every live subscriber of every user (instance-wide changes such as
+    /// addons). Never blocks; channels nobody listens to any more are dropped.
+    pub fn publish_all(&self, ev: &Event) {
+        self.lock()
+            .retain(|_, tx| tx.receiver_count() > 0 && tx.send(ev.clone()).is_ok());
+    }
+
     /// Number of live subscribers for `user_id` (diagnostics/tests).
     pub fn subscriber_count(&self, user_id: Uuid) -> usize {
         self.lock()
@@ -137,6 +148,24 @@ mod tests {
         ));
         assert!(rb.try_recv().is_err());
         assert_eq!(ev.subscriber_count(a), 2);
+    }
+
+    #[tokio::test]
+    async fn publish_all_reaches_every_user() {
+        let ev = Events::new();
+        let (a, b, gone) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let mut ra = ev.subscribe(a);
+        let mut rb = ev.subscribe(b);
+        drop(ev.subscribe(gone));
+        ev.publish_all(&Event::Addons);
+        assert!(matches!(ra.recv().await.unwrap(), Event::Addons));
+        assert!(matches!(rb.recv().await.unwrap(), Event::Addons));
+        assert_eq!(ev.lock().len(), 2);
+        assert_eq!(Event::Addons.name(), "addons");
+        assert_eq!(
+            serde_json::to_string(&Event::Addons).unwrap(),
+            r#"{"type":"addons"}"#
+        );
     }
 
     #[test]

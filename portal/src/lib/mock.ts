@@ -25,6 +25,13 @@ import type {
   SsoTestCheck,
   User,
 } from "./types";
+import type {
+  Addon,
+  AddonAudience,
+  AddonManifest,
+  AddonSlot,
+  AddonVersion,
+} from "./types";
 
 const NOW = Date.now();
 const MIN = 60_000;
@@ -474,6 +481,155 @@ function ssoTest(p: SsoRow): SsoTestCheck[] {
   return checks;
 }
 
+// Addons ------------------------------------------------------------------
+
+// `?mock=empty` starts with no addons; `?mock=nobody` has one that is on with
+// nobody selected (to see the warning).
+const MOCK_VARIANT =
+  typeof window === "undefined"
+    ? null
+    : new URLSearchParams(window.location.search).get("mock");
+
+const ADDON_SLOTS: AddonSlot[] = [
+  {
+    id: "agent-sidebar",
+    name: "Agent sidebar",
+    description: "Replaces the ⌘E pane in Copper.",
+  },
+];
+const MAX_ADDON_BYTES = 16 * 1024 * 1024;
+
+interface AddonVersionRow extends AddonVersion {
+  manifest: AddonManifest;
+}
+interface AddonRow {
+  id: string;
+  slot: string;
+  name: string;
+  enabled: boolean;
+  audience: AddonAudience;
+  people: string[];
+  settings: Record<string, unknown>;
+  priority: number;
+  revision: number;
+  current: string;
+  versions: AddonVersionRow[];
+  created_at: string;
+  updated_at: string;
+}
+
+const researchManifest = (version: string): AddonManifest => ({
+  schema: "copper-addon/1",
+  id: "hollis.research-sidebar",
+  name: "Research sidebar",
+  version,
+  slot: "agent-sidebar",
+  entry: "index.html",
+  description:
+    "Ask about the page you're on and save what you find to the studio's notes.",
+  author: "Hollis Studio",
+  bridge: 1,
+  permissions: {
+    hosts: ["research.example.com"],
+    capabilities: ["identity", "storage", "fetch", "page"],
+  },
+  settings: {
+    apiUrl: {
+      type: "string",
+      default: "https://research.example.com/api",
+      title: "Research API URL",
+    },
+    notebook: {
+      type: "string",
+      default: "",
+      title: "Notebook for saved findings",
+      description: "Leave blank to ask each person the first time.",
+    },
+    maxSources: { type: "number", default: 8, title: "Sources per answer" },
+    showCitations: {
+      type: "boolean",
+      default: true,
+      title: "Show citations",
+      description: "Link each claim to the page it came from.",
+    },
+    blockedSites: {
+      type: "array",
+      default: [],
+      title: "Sites it never reads",
+      description: "A JSON list of hostnames.",
+    },
+  },
+  platforms: ["mac", "linux", "windows"],
+});
+
+const fakeSha = (n: number) =>
+  Array.from({ length: 64 }, (_, i) => ((n * 7 + i * 13) % 16).toString(16)).join("");
+
+let addonRows: AddonRow[] =
+  MOCK_VARIANT === "empty"
+    ? []
+    : [
+        {
+          id: "hollis.research-sidebar",
+          slot: "agent-sidebar",
+          name: "Research sidebar",
+          enabled: true,
+          audience: "people",
+          people:
+            MOCK_VARIANT === "nobody"
+              ? []
+              : ["ana@hollis.studio", "priya@hollis.studio", "noor@hollis.studio"],
+          settings: { notebook: "Studio research", maxSources: 5 },
+          priority: 0,
+          revision: 7,
+          current: "1.2.0",
+          versions: [
+            ["1.2.0", 2 * DAY, 48_213, admin.email],
+            ["1.1.0", 9 * DAY, 46_870, admin.email],
+            ["1.0.0", 16 * DAY, 41_092, null],
+          ].map(([version, when, size, by], i) => ({
+            version: version as string,
+            sha256: fakeSha(i + 3),
+            size_bytes: size as number,
+            created_at: ago(when as number),
+            uploaded_by: by as string | null,
+            manifest: researchManifest(version as string),
+          })),
+          created_at: ago(16 * DAY),
+          updated_at: ago(2 * DAY - 20 * MIN),
+        },
+      ];
+
+const addonSeed: [string, string | null, Record<string, unknown> | null, number][] =
+  MOCK_VARIANT === "empty"
+    ? []
+    : [
+        [
+          "addon.create",
+          "hollis.research-sidebar",
+          { id: "hollis.research-sidebar", name: "Research sidebar", version: "1.0.0" },
+          16 * DAY,
+        ],
+        [
+          "addon.upload",
+          "hollis.research-sidebar",
+          { id: "hollis.research-sidebar", name: "Research sidebar", version: "1.1.0" },
+          9 * DAY,
+        ],
+        [
+          "addon.upload",
+          "hollis.research-sidebar",
+          { id: "hollis.research-sidebar", name: "Research sidebar", version: "1.2.0" },
+          2 * DAY,
+        ],
+        [
+          "addon.update",
+          "hollis.research-sidebar",
+          { id: "hollis.research-sidebar", name: "Research sidebar", enabled: true },
+          2 * DAY - 20 * MIN,
+        ],
+      ];
+
 let auditSeq = 0;
 const audit: AuditEntry[] = [];
 function record(
@@ -580,6 +736,7 @@ const seed: [string, string | null, Record<string, unknown> | null, number][] = 
     5 * HOUR,
   ],
 ];
+seed.push(...addonSeed);
 seed
   .sort((a, b) => b[3] - a[3])
   .forEach(([action, target, detail, when]) => record(action, target, detail, ago(when)));
@@ -672,6 +829,348 @@ const newestFirst = <T extends { created_at: string }>(rows: T[]) =>
   [...rows].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
 
 type Body = Record<string, unknown>;
+
+// Addons ------------------------------------------------------------------
+
+function toAddon(row: AddonRow): Addon {
+  const versions = [...row.versions].sort(
+    (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at),
+  );
+  const current = versions.find((v) => v.version === row.current) ?? null;
+  const strip = ({ manifest: _m, ...v }: AddonVersionRow): AddonVersion => v;
+  return {
+    id: row.id,
+    slot: row.slot,
+    name: row.name,
+    enabled: row.enabled,
+    audience: row.audience,
+    people: row.people.map((email) => {
+      const user = users.find((u) => u.email === email);
+      return { email, name: user?.display_name ?? null, user_id: user?.id ?? null };
+    }),
+    settings: { ...row.settings },
+    priority: row.priority,
+    revision: row.revision,
+    current: current ? strip(current) : null,
+    versions: versions.map(strip),
+    manifest: current?.manifest ?? null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+const SETTING_TYPES = ["string", "number", "boolean", "object", "array"];
+
+function settingTypeOk(type: string, v: unknown): boolean {
+  switch (type) {
+    case "string":
+      return typeof v === "string";
+    case "number":
+      return typeof v === "number" && Number.isFinite(v);
+    case "boolean":
+      return typeof v === "boolean";
+    case "array":
+      return Array.isArray(v);
+    case "object":
+      return typeof v === "object" && v !== null && !Array.isArray(v);
+    default:
+      return false;
+  }
+}
+
+/** The §2 manifest checks the server runs, enough to exercise the error paths. */
+function validateManifest(raw: unknown, files: string[], slot: string): AddonManifest {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    throw bad("manifest.json must be a JSON object");
+  const m = raw as Record<string, unknown>;
+  if (m.schema !== "copper-addon/1")
+    throw bad('manifest schema must be "copper-addon/1"');
+  const id = typeof m.id === "string" ? m.id : "";
+  if (!/^[a-z0-9][a-z0-9.-]{2,63}$/.test(id) || !id.includes(".") || id.includes(".."))
+    throw bad(
+      "manifest id must look like vendor.name: lowercase letters, digits, dots and dashes",
+    );
+  const name = typeof m.name === "string" ? m.name.trim() : "";
+  if (!name || name.length > 60) throw bad("manifest name must be 1-60 characters");
+  const version = typeof m.version === "string" ? m.version : "";
+  if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version))
+    throw bad(`manifest version "${version}" is not MAJOR.MINOR.PATCH`);
+  if (!ADDON_SLOTS.some((s) => s.id === m.slot))
+    throw bad(`manifest slot "${String(m.slot)}" is not a slot this server knows`);
+  if (m.slot !== slot)
+    throw bad(`manifest slot is "${String(m.slot)}", but you chose "${slot}"`);
+  const entry = typeof m.entry === "string" ? m.entry : "";
+  if (!entry.endsWith(".html")) throw bad("manifest entry must be an .html file");
+  if (!files.includes(entry)) throw bad(`entry "${entry}" is not in the bundle`);
+  if (typeof m.bridge !== "number" || !Number.isInteger(m.bridge) || m.bridge < 1)
+    throw bad("manifest bridge must be a whole number of 1 or more");
+  if (typeof m.description === "string" && m.description.length > 280)
+    throw bad("manifest description must be at most 280 characters");
+  if (m.settings !== undefined) {
+    if (
+      typeof m.settings !== "object" ||
+      m.settings === null ||
+      Array.isArray(m.settings)
+    )
+      throw bad("manifest settings must be an object");
+    for (const [key, spec] of Object.entries(m.settings as Record<string, unknown>)) {
+      const t = (spec as { type?: unknown } | null)?.type;
+      if (typeof t !== "string" || !SETTING_TYPES.includes(t))
+        throw bad(`setting "${key}" needs a type: ${SETTING_TYPES.join(", ")}`);
+    }
+  }
+  return { ...(m as AddonManifest), name };
+}
+
+// A tiny zip reader (central directory + stored/deflate entries), mock only.
+interface ZipEntry {
+  name: string;
+  method: number;
+  compressed: number;
+  size: number;
+  offset: number;
+}
+
+function zipEntries(bytes: Uint8Array): ZipEntry[] {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let eocd = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 0xffff); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw bad("the file is not a zip archive");
+  const count = view.getUint16(eocd + 10, true);
+  let p = view.getUint32(eocd + 16, true);
+  const decoder = new TextDecoder();
+  const entries: ZipEntry[] = [];
+  for (let n = 0; n < count; n++) {
+    if (p + 46 > bytes.length || view.getUint32(p, true) !== 0x02014b50)
+      throw bad("the zip archive is damaged");
+    const nameLength = view.getUint16(p + 28, true);
+    const extra = view.getUint16(p + 30, true);
+    const comment = view.getUint16(p + 32, true);
+    entries.push({
+      name: decoder.decode(bytes.subarray(p + 46, p + 46 + nameLength)),
+      method: view.getUint16(p + 10, true),
+      compressed: view.getUint32(p + 20, true),
+      size: view.getUint32(p + 24, true),
+      offset: view.getUint32(p + 42, true),
+    });
+    p += 46 + nameLength + extra + comment;
+  }
+  return entries;
+}
+
+async function zipRead(bytes: Uint8Array, entry: ZipEntry): Promise<Uint8Array> {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(entry.offset, true) !== 0x04034b50)
+    throw bad("the zip archive is damaged");
+  const start =
+    entry.offset +
+    30 +
+    view.getUint16(entry.offset + 26, true) +
+    view.getUint16(entry.offset + 28, true);
+  const data = bytes.slice(start, start + entry.compressed);
+  if (entry.method === 0) return data;
+  if (entry.method !== 8)
+    throw bad(`zip entry "${entry.name}" uses an unsupported method`);
+  const stream = new Blob([data])
+    .stream()
+    .pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const hex = (buf: ArrayBuffer | Uint8Array) =>
+    Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0")).join("");
+  if (typeof crypto !== "undefined" && crypto.subtle) {
+    return hex(await crypto.subtle.digest("SHA-256", bytes));
+  }
+  return hex(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+/** `POST addons?slot=…` with a raw `.copperaddon` body. */
+async function uploadAddon(params: URLSearchParams, body: unknown): Promise<unknown> {
+  if (!signedIn()) throw new HttpError(401, "admin_session", "not signed in");
+  const slot = params.get("slot") ?? "";
+  if (!slot) throw bad("the slot query parameter is required");
+  if (!ADDON_SLOTS.some((s) => s.id === slot)) throw bad(`unknown slot "${slot}"`);
+  if (!(body instanceof Blob)) throw bad("send the addon as a zip body");
+  if (body.size > MAX_ADDON_BYTES)
+    throw new HttpError(413, "payload_too_large", "the addon is larger than 16 MiB");
+  const bytes = new Uint8Array(await body.arrayBuffer());
+
+  const all = zipEntries(bytes).filter(
+    (e) =>
+      !e.name.endsWith("/") &&
+      !e.name.startsWith("__MACOSX/") &&
+      !e.name.split("/").includes(".DS_Store"),
+  );
+  // manifest.json at the root, or inside one top-level folder (stripped).
+  const tops = new Set(
+    all.map((e) => (e.name.includes("/") ? e.name.split("/")[0] : "")),
+  );
+  const prefix =
+    !all.some((e) => e.name === "manifest.json") && tops.size === 1 && !tops.has("")
+      ? `${[...tops][0]}/`
+      : "";
+  const files = all.map((e) => e.name.slice(prefix.length));
+  const manifestEntry = all.find((e) => e.name === `${prefix}manifest.json`);
+  if (!manifestEntry) throw bad("manifest.json is missing from the root of the zip");
+  if (files.length > 1000) throw bad("the bundle has more than 1000 files");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(await zipRead(bytes, manifestEntry)));
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw bad("manifest.json is not valid JSON");
+  }
+  const manifest = validateManifest(parsed, files, slot);
+  const sha256 = await sha256Hex(bytes);
+  const size = Math.round(all.reduce((n, e) => n + e.size, 0) * 1.37 + 120);
+  const nowIso = new Date().toISOString();
+  const version: AddonVersionRow = {
+    version: manifest.version,
+    sha256,
+    size_bytes: size,
+    created_at: nowIso,
+    uploaded_by: admin.email,
+    manifest,
+  };
+
+  const row = addonRows.find((r) => r.id === manifest.id);
+  if (!row) {
+    const created: AddonRow = {
+      id: manifest.id,
+      slot,
+      name: manifest.name,
+      enabled: false,
+      audience: "people",
+      people: [],
+      settings: {},
+      priority: 0,
+      revision: 1,
+      current: manifest.version,
+      versions: [version],
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+    addonRows = [...addonRows, created];
+    record(
+      "addon.create",
+      created.id,
+      { id: created.id, name: created.name, version: manifest.version, slot },
+      nowIso,
+    );
+    return { outcome: "created", addon: toAddon(created) };
+  }
+  if (row.slot !== slot) throw bad(`"${row.id}" is an addon for the ${row.slot} slot`);
+  const same = row.versions.find((v) => v.version === manifest.version);
+  if (same) {
+    if (same.sha256 === sha256) return { outcome: "unchanged", addon: toAddon(row) };
+    throw new HttpError(
+      409,
+      "version_exists",
+      `version ${manifest.version} of ${row.id} already exists with different contents. Raise the version number and upload again`,
+    );
+  }
+  row.versions.push(version);
+  row.current = manifest.version;
+  row.name = manifest.name;
+  // Keep only settings the new manifest still declares.
+  const keys = Object.keys(manifest.settings ?? {});
+  row.settings = Object.fromEntries(
+    Object.entries(row.settings).filter(([k]) => keys.includes(k)),
+  );
+  row.revision += 1;
+  row.updated_at = nowIso;
+  record(
+    "addon.upload",
+    row.id,
+    { id: row.id, name: row.name, version: manifest.version },
+    nowIso,
+  );
+  return { outcome: "new_version", addon: toAddon(row) };
+}
+
+function addonRoute(method: string, seg: string[], body: Body, nowIso: string): unknown {
+  if (method === "GET" && seg.length === 2 && seg[1] === "slots") return ADDON_SLOTS;
+  if (method === "GET" && seg.length === 1) return addonRows.map(toAddon);
+  const row = addonRows.find((r) => r.id === seg[1]);
+  if (!row) throw notFound();
+  if (method === "GET" && seg.length === 2) return toAddon(row);
+  if (method === "GET" && seg[2] === "versions" && seg[4] === "bundle") {
+    const v = row.versions.find((x) => x.version === seg[3]);
+    if (!v) throw notFound();
+    return { format: "copper-addon-bundle/1", manifest: v.manifest, files: [] };
+  }
+  if (method === "DELETE" && seg.length === 2) {
+    addonRows = addonRows.filter((r) => r !== row);
+    record("addon.delete", row.id, { id: row.id, name: row.name }, nowIso);
+    return { ok: true };
+  }
+  if (method !== "PATCH" || seg.length !== 2) throw notFound();
+
+  const changed: Record<string, unknown> = { id: row.id, name: row.name };
+  const next = { ...row };
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== "boolean") throw bad("enabled must be true or false");
+    next.enabled = body.enabled;
+    changed.enabled = body.enabled;
+  }
+  if (body.audience !== undefined) {
+    if (body.audience !== "everyone" && body.audience !== "people")
+      throw bad('audience must be "everyone" or "people"');
+    next.audience = body.audience;
+    changed.audience = body.audience;
+  }
+  if (body.people !== undefined) {
+    if (!Array.isArray(body.people)) throw bad("people must be a list of emails");
+    const emails = body.people.map((e) => String(e).trim().toLowerCase());
+    const badEmail = emails.find((e) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e));
+    if (badEmail !== undefined) throw bad(`"${badEmail}" is not an email address`);
+    next.people = [...new Set(emails)];
+    changed.people = next.people.length;
+  }
+  if (body.settings !== undefined) {
+    const s = body.settings;
+    if (typeof s !== "object" || s === null || Array.isArray(s))
+      throw bad("settings must be an object");
+    if (JSON.stringify(s).length > 16 * 1024) throw bad("settings must be under 16 KiB");
+    const manifest = row.versions.find((v) => v.version === row.current)?.manifest;
+    const specs = manifest?.settings ?? {};
+    for (const [key, value] of Object.entries(s)) {
+      const spec = specs[key];
+      if (!spec) throw bad(`unknown setting "${key}"`);
+      if (!settingTypeOk(spec.type, value))
+        throw bad(
+          `setting "${key}" must be ${spec.type === "array" || spec.type === "object" ? "an" : "a"} ${spec.type}`,
+        );
+    }
+    next.settings = { ...(s as Record<string, unknown>) };
+    changed.settings = Object.keys(s);
+  }
+  if (body.priority !== undefined) {
+    if (typeof body.priority !== "number" || !Number.isInteger(body.priority))
+      throw bad("priority must be a whole number");
+    next.priority = body.priority;
+    changed.priority = body.priority;
+  }
+  if (body.current_version !== undefined) {
+    const v = row.versions.find((x) => x.version === body.current_version);
+    if (!v) throw bad(`there is no version "${String(body.current_version)}"`);
+    next.current = v.version;
+    next.name = v.manifest.name;
+    changed.current_version = v.version;
+  }
+  next.revision = row.revision + 1;
+  next.updated_at = nowIso;
+  addonRows = addonRows.map((r) => (r === row ? next : r));
+  record("addon.update", row.id, changed, nowIso);
+  return toAddon(next);
+}
 
 function route(
   method: string,
@@ -1068,6 +1567,8 @@ function route(
     if (method === "GET" && seg[2] === "devices") return row.devices;
   }
 
+  if (seg[0] === "addons") return addonRoute(method, seg, body, nowIso);
+
   if (method === "GET" && path === "audit") return paginate(audit, params);
 
   throw notFound();
@@ -1089,6 +1590,16 @@ export async function mockFetch(url: string, init: RequestInit = {}): Promise<Re
   const headers = new Headers(init.headers);
   if (method !== "GET" && headers.get("X-Requested-With") !== "copper-cloud-portal") {
     return json(403, { error: "csrf", message: "forbidden" });
+  }
+  if (method === "POST" && path === "addons") {
+    try {
+      return json(201, await uploadAddon(parsed.searchParams, init.body));
+    } catch (error) {
+      if (error instanceof HttpError) {
+        return json(error.status, { error: error.code, message: error.message });
+      }
+      return json(500, { error: "internal", message: String(error) });
+    }
   }
   let body: Body = {};
   if (typeof init.body === "string" && init.body) {

@@ -46,6 +46,15 @@ import type {
   UserPatch,
   UserQuery,
 } from "./types";
+import {
+  type Addon,
+  type AddonPatch,
+  type AddonSlot,
+  type AddonUpload,
+  normalizeAddon,
+  normalizeAddonList,
+  normalizeAddonUpload,
+} from "./types";
 
 export const API_BASE = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/+$/, "");
 export const MOCK_MODE = process.env.NEXT_PUBLIC_MOCK === "1";
@@ -91,6 +100,9 @@ interface RequestOptions {
   signal?: AbortSignal;
   /** Default true. `login` handles its own 401s. */
   redirectOn401?: boolean;
+  /** Send this file as the raw body (instead of JSON `body`), with `contentType`. */
+  file?: Blob;
+  contentType?: string;
 }
 
 const FALLBACK_MESSAGES: Record<string, string> = {
@@ -142,12 +154,13 @@ async function transport(url: string, init: RequestInit): Promise<Response> {
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = "GET", body, query, signal, redirectOn401 = true } = options;
+  const { method = "GET", body, query, signal, redirectOn401 = true, file } = options;
   const headers: Record<string, string> = {
     Accept: "application/json",
     [CSRF_HEADER]: CSRF_VALUE,
   };
   if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (file) headers["Content-Type"] = options.contentType ?? "application/octet-stream";
 
   const url = `${API_BASE}/admin/api/${path}${buildQuery(query)}`;
   let res: Response;
@@ -157,7 +170,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       credentials: "same-origin",
       cache: "no-store",
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: file ?? (body === undefined ? undefined : JSON.stringify(body)),
       signal,
     });
   } catch (error) {
@@ -308,6 +321,31 @@ export const api = {
       }),
     revoke: (codeId: string) =>
       request<Ok>(`pairing-codes/${id(codeId)}`, { method: "DELETE" }),
+  },
+
+  // Addons (web bundles that replace a Copper slot; see docs/admin-api.md)
+  addons: {
+    slots: (signal?: AbortSignal) => request<AddonSlot[]>("addons/slots", { signal }),
+    list: async (signal?: AbortSignal) =>
+      normalizeAddonList(await request<unknown>("addons", { signal })),
+    get: async (addonId: string, signal?: AbortSignal) =>
+      normalizeAddon(await request<unknown>(`addons/${id(addonId)}`, { signal })),
+    /** Raw `.copperaddon` zip. `slot` must match the manifest's slot. */
+    upload: async (slot: string, file: Blob): Promise<AddonUpload> =>
+      normalizeAddonUpload(
+        await request<unknown>("addons", {
+          method: "POST",
+          query: { slot },
+          file,
+          contentType: "application/zip",
+        }),
+      ),
+    update: async (addonId: string, patch: AddonPatch): Promise<Addon> =>
+      normalizeAddon(
+        await request<unknown>(`addons/${id(addonId)}`, { method: "PATCH", body: patch }),
+      ),
+    remove: (addonId: string) =>
+      request<Ok | undefined>(`addons/${id(addonId)}`, { method: "DELETE" }),
   },
 
   // Audit

@@ -7,6 +7,7 @@ import {
   LaptopIcon,
   LayoutGridIcon,
   LogOutIcon,
+  PuzzleIcon,
   SettingsIcon,
   ShieldCheckIcon,
   SparklesIcon,
@@ -35,6 +36,7 @@ const NAV = [
   { href: "/integrations/", label: "Agent access", icon: BotIcon },
   { href: "/canvases/", label: "Canvases", icon: FrameIcon },
   { href: "/intelligence/", label: "AI keys", icon: SparklesIcon },
+  { href: "/addons/", label: "Addons", icon: PuzzleIcon },
   { href: "/settings/", label: "Settings", icon: SettingsIcon },
 ] as const;
 

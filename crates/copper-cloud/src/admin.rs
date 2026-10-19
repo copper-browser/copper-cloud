@@ -277,6 +277,7 @@ async fn dispatch(cfg: &Config, pool: &sqlx::PgPool, cmd: AdminCommand) -> anyho
                 println!("deleted {entries} of {email}");
             }
         }
+        AdminCommand::Addons(cmd) => crate::admin_addons_cli::dispatch(cfg, pool, cmd).await?,
     }
     Ok(())
 }

@@ -2,6 +2,8 @@
 //! Integration tests drive [`build_app`] directly.
 
 pub mod admin;
+pub mod admin_addons;
+pub mod admin_addons_cli;
 pub mod admin_api;
 pub mod cli;
 pub mod doctor;
