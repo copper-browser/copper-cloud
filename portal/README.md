@@ -40,6 +40,7 @@ src/app/login/            sign-in (no shell)
 src/app/(console)/        rail + session; one folder per page
   page.tsx, overview-view.tsx
   keys/ people/ devices/ canvases/ settings/   page.tsx (metadata) + view.tsx (client)
+  sso/ integrations/                           single sign-on, agent access (server ≥ 0.9.0)
 src/components/           shell, data table, dialogs, credential well, status badge
 src/components/ui/        shadcn/ui (Base UI) primitives, lightly retuned
 src/hooks/                data loading (useResource/useList), clock, copy, `/` shortcut

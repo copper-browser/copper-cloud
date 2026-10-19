@@ -49,6 +49,8 @@ tracing-subscriber.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 governor.workspace = true
+# SSO: code exchange + OIDC discovery (rustls + ring, webpki roots; no OpenSSL).
+reqwest = { workspace = true, features = ["rustls-tls"] }
 
 
 [dev-dependencies]

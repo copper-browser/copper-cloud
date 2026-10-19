@@ -7,18 +7,20 @@ pub mod cli;
 pub mod doctor;
 pub mod portal;
 pub mod serve;
+pub mod start;
 
 use axum::Router;
 use copper_cloud_core::state::SharedState;
 
 /// The full HTTP app: core (`/healthz`, `/v1` auth/pairing/devices/sync) + canvases behind
-/// the instance gate, the admin API at `/admin/api` (cookie sessions, not gated) and the
-/// embedded admin portal for every other path; auth rate limiters and request
+/// the instance gate, the admin API at `/admin/api` (cookie sessions, not gated), the SSO
+/// onboarding page at `/start` and the embedded admin portal for every other path; auth rate limiters and request
 /// tracing/metrics around everything.
 pub fn build_app(state: SharedState) -> Router {
     let root = Router::new()
         .nest("/admin/api", admin_api::router())
         .merge(copper_cloud_canvas::landing_router())
+        .route("/start", axum::routing::get(start::start))
         .fallback(portal::serve);
     copper_cloud_core::app_with(state, copper_cloud_canvas::router(), root)
 }

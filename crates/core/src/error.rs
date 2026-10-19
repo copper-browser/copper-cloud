@@ -32,6 +32,14 @@ pub enum ApiError {
         code: &'static str,
         message: &'static str,
     },
+    /// Any status with a machine-readable code and a message built at run time (e.g. one that
+    /// names the allowed SSO domains).
+    #[error("{code}: {message}")]
+    Coded {
+        status: StatusCode,
+        code: &'static str,
+        message: String,
+    },
     /// 409 — the value is merged into the body (objects) so the client gets the server copy.
     #[error("conflict")]
     Conflict(Value),
@@ -55,12 +63,22 @@ impl ApiError {
         Self::Internal(anyhow::anyhow!("{msg}"))
     }
 
+    /// [`ApiError::Coded`] shorthand.
+    pub fn coded(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self::Coded {
+            status,
+            code,
+            message: message.into(),
+        }
+    }
+
     pub fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden | Self::Denied { .. } => StatusCode::FORBIDDEN,
             Self::NotFound | Self::NotFoundCode { .. } => StatusCode::NOT_FOUND,
+            Self::Coded { status, .. } => *status,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -74,7 +92,8 @@ impl ApiError {
             Self::BadRequest(_) => "bad_request",
             Self::Unauthorized(code)
             | Self::Denied { code, .. }
-            | Self::NotFoundCode { code, .. } => code,
+            | Self::NotFoundCode { code, .. }
+            | Self::Coded { code, .. } => code,
             Self::Forbidden => "forbidden",
             Self::NotFound => "not_found",
             Self::Conflict(_) => "conflict",
@@ -147,6 +166,7 @@ impl IntoResponse for ApiError {
             Self::Denied { message, .. } | Self::NotFoundCode { message, .. } => {
                 json!({ "error": code, "message": message })
             }
+            Self::Coded { message, .. } => json!({ "error": code, "message": message }),
             Self::NotFound => json!({ "error": code, "message": "not found" }),
             Self::Conflict(Value::Object(mut map)) => {
                 map.insert("error".into(), Value::from(code));

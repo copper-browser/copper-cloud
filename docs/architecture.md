@@ -16,8 +16,8 @@
 
 | Crate | Role |
 |---|---|
-| `crates/copper-cloud` (bin + lib) | CLI (clap), `serve` bootstrap, graceful shutdown, `doctor`, `admin`, admin API (`/admin/api`), embedded admin portal (rust-embed of `portal/out`), migrations dir |
-| `crates/core` (`copper-cloud-core`) | config, db pool + embedded migrations, crypto, access mode + access keys + gate, auth extractor + routes, pairing codes, sync docs/history/SSE, cloud-wide intelligence keys, events, TLS, link codes, observability, app composition |
+| `crates/copper-cloud` (bin + lib) | CLI (clap), `serve` bootstrap, graceful shutdown, `doctor`, `admin`, admin API (`/admin/api`), `/start` onboarding page, embedded admin portal (rust-embed of `portal/out`), migrations dir |
+| `crates/core` (`copper-cloud-core`) | config, db pool + embedded migrations, crypto, access mode + access keys + gate, auth extractor + routes, pairing codes, single sign-on (`sso`), agent integrations (`agents`), sync docs/history/SSE, cloud-wide intelligence keys, events, TLS, link codes, observability, app composition |
 | `portal/` | Next.js static export (the admin portal), built with bun into `portal/out` before cargo in CI/release |
 | `crates/canvas` (`copper-cloud-canvas`) | canvases REST + Yjs rooms (see [canvas.md](canvas.md)) |
 
@@ -33,8 +33,10 @@ governor, tracing (+ JSON), metrics + Prometheus exporter. `unsafe` is forbidden
 Router
 ├── GET /healthz                      (not gated)
 ├── /v1  = core::router() ⊕ canvas::router()     (fallback → 404 JSON)
-│         POST /v1/auth/pair is the only /v1 route without the gate header
+│         ungated: POST /v1/auth/pair, GET /v1/auth/sso, POST /v1/auth/sso/{id},
+│                  POST /v1/agents/pair (each carries its own credential or none)
 ├── /admin/api = admin_api::router()   (cookie sessions + CSRF header; fallback → 404 JSON)
+├── GET /start, GET /join/{token}      (server-rendered landing pages, not gated)
 └── fallback → portal::serve           (embedded portal/out; /v1x, /metrics… → 404 JSON)
 layers (outermost first):
   observe::track      span {method, path, route, ip, user_id, status, latency_ms,
@@ -42,7 +44,7 @@ layers (outermost first):
   instance_gate       /v1 only: X-Copper-Instance = instance key (open mode, constant-time)
                       or access key (SHA-256 lookup) → GateIdentity extension; else 401
                       instance_key. access_mode cached 5 s.
-  auth_rate_limit     /v1/auth/* except GET /me + pairing management; /admin/api/login has
+  auth_rate_limit     /v1/auth/* except GET /me, GET /sso + pairing management; /admin/api/login has
                       its own bucket. GCRA keyed by client IP (IPv6 /64)
 ```
 
@@ -59,14 +61,17 @@ it. The query string is never logged (it can carry `?token=`).
 
 | Table | Key | Notes |
 |---|---|---|
-| `users` | `id` | `lower(email)` unique, `password_hash` (Argon2id PHC), `data_key_wrapped` (60 B), `disabled` |
-| `devices` | `(user_id, id)` | client-generated ids, `name`, `last_seen_at` |
+| `users` | `id` | `lower(email)` unique, `password_hash` (Argon2id PHC; `NULL` = SSO-only), `data_key_wrapped` (60 B), `disabled` |
+| `devices` | `(user_id, id)` | client-generated ids, `name`, `last_seen_at`, `agent_integration_id?` (paired by an agent integration) |
 | `sessions` | `id`; `token_sha256` unique | FK → devices (cascade), sliding `expires_at` |
 | `sync_docs` | `(user_id, domain)` | `version` (LWW), `device_id` (last writer), `payload` sealed, `payload_bytes` |
 | `history` | `seq` bigserial; index `(user_id, seq)` | `device_id`, `visited_at`, `payload` sealed |
-| `server_settings` | `key` | runtime settings from the admin CLI / portal (`allow_signup`, `access_mode`) |
-| `access_keys` | `id`; `key_sha256` unique | per-person gate credentials: `label`, `email?`, `expires_at?`, `revoked_at?`, `uses`/`max_uses?`, `last_used_at` |
-| `pairing_codes` | `id`; `code_sha256` unique | single-use, 10-min codes: `user_id`, `device_name?`, `used_at`, `used_by_device` |
+| `server_settings` | `key` | runtime settings from the admin CLI / portal (`allow_signup`, `access_mode`, `password_signin`, `instance_name`) |
+| `access_keys` | `id`; `key_sha256` unique | per-person gate credentials: `label`, `email?`, `expires_at?`, `revoked_at?`, `uses`/`max_uses?`, `last_used_at`, `device_id?` (minted for that device by pairing/SSO) |
+| `pairing_codes` | `id`; `code_sha256` unique | single-use, 10-min codes: `user_id`, `device_name?`, `used_at`, `used_by_device`, `device_id?` (bound by agent pairing) |
+| `sso_providers` | `id` (`google` or a slug) | `kind` google/oidc, `client_id`, sealed `client_secret_sealed` under `data_key_wrapped`, `issuer?` (OIDC), `domains[]`, `auto_create`, `enabled` |
+| `user_identities` | `(provider_id, subject)` | SSO identity → `user_id` link, last reported `email`, `last_login_at` |
+| `agent_integrations` | `id`; `key_sha256` unique | `cai_` key hash, `name`, `domains[]`, `create_users`, `last_used_at`, `revoked_at` |
 | `intelligence_settings` | `id` = 1 (singleton) | cloud-wide AI keys: `data_key_wrapped`, sealed `jev_key_sealed` / `router_key_sealed`, `jev_endpoint`, `jev_model`, `router_url`, `enabled`, `agent_max_turns` (org agent round budget, 1–500 or NULL), `updated_at/by` |
 | `admins` | `id`; `lower(email)` unique | portal admin accounts (Argon2id), `last_login_at` |
 | `admin_sessions` | `id`; `token_sha256` unique | `cc_admin` cookie sessions, fixed 7-day `expires_at` |

@@ -16,6 +16,8 @@ pub struct AppState {
     pub started_at: Instant,
     /// `server_settings.access_mode`, cached for 5 s (see [`crate::access::access_mode`]).
     pub access_mode: AccessModeCache,
+    /// SSO HTTP client + OIDC discovery cache.
+    pub sso: crate::sso::SsoCache,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -31,6 +33,7 @@ impl AppState {
             events: Events::new(),
             started_at: Instant::now(),
             access_mode: AccessModeCache::default(),
+            sso: crate::sso::SsoCache::default(),
         })
     }
 }

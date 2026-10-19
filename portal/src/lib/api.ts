@@ -17,9 +17,13 @@ import type {
   CanvasQuery,
   CreateAccessKey,
   CreatedAccessKey,
+  CreatedIntegration,
+  CreateIntegration,
   Device,
   DeviceQuery,
   DevicesDeleted,
+  Integration,
+  IntegrationDevice,
   IntelligenceSettings,
   IntelligenceUpdate,
   LoginResponse,
@@ -31,8 +35,13 @@ import type {
   PairingCode,
   PairingCodeQuery,
   PasswordChanged,
+  RotatedIntegrationKey,
   Settings,
   SettingsPatch,
+  SsoPatch,
+  SsoProviderInput,
+  SsoSettings,
+  SsoTestResult,
   User,
   UserPatch,
   UserQuery,
@@ -203,6 +212,11 @@ const page = (q?: PageQuery): Query => ({
 });
 const id = (value: string) => encodeURIComponent(value);
 
+/** These lists are documented as bare arrays; accept the page envelope too. */
+type ListBody<T> = T[] | Page<T>;
+const items = <T>(body: ListBody<T>): T[] =>
+  Array.isArray(body) ? body : (body?.items ?? []);
+
 export const api = {
   // Session
   login: (email: string, password: string) =>
@@ -302,6 +316,53 @@ export const api = {
       query: { limit: q?.limit ?? 20, offset: q?.offset },
       signal,
     }),
+
+  // Single sign-on (copper-cloud ≥ 0.9.0). Mutations answer with whatever the
+  // server sends; the views reload `sso` afterwards rather than trust a shape.
+  sso: {
+    get: (signal?: AbortSignal) => request<SsoSettings>("sso", { signal }),
+    update: (patch: SsoPatch) =>
+      request<unknown>("sso", { method: "PATCH", body: patch }),
+    saveProvider: (providerId: string, input: SsoProviderInput) =>
+      request<unknown>(`sso/providers/${id(providerId)}`, { method: "PUT", body: input }),
+    removeProvider: (providerId: string) =>
+      request<unknown>(`sso/providers/${id(providerId)}`, { method: "DELETE" }),
+    testProvider: (providerId: string) =>
+      request<SsoTestResult>(`sso/providers/${id(providerId)}/test`, { method: "POST" }),
+  },
+
+  // Agent access: integration keys (`cai_…`, shown once) for services such as
+  // bot platforms that pair their own Copper as a person (copper-cloud ≥ 0.9.0).
+  integrations: {
+    list: async (signal?: AbortSignal) =>
+      items(await request<ListBody<Integration>>("integrations", { signal })),
+    create: (input: CreateIntegration) =>
+      request<CreatedIntegration>("integrations", { method: "POST", body: input }),
+    rotate: (integrationId: string) =>
+      request<RotatedIntegrationKey>(`integrations/${id(integrationId)}/rotate`, {
+        method: "POST",
+      }),
+    revoke: (integrationId: string) =>
+      request<unknown>(`integrations/${id(integrationId)}`, { method: "DELETE" }),
+    devices: async (integrationId: string, signal?: AbortSignal) =>
+      items(
+        await request<ListBody<IntegrationDevice>>(
+          `integrations/${id(integrationId)}/devices`,
+          { signal },
+        ),
+      ),
+  },
 };
+
+/**
+ * True when the server doesn't have the route at all: a copper-cloud older
+ * than 0.9.0 answers any unknown `/admin/api/...` path with 404.
+ */
+export function isUnsupported(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
+
+/** The release that added single sign-on and agent access. */
+export const SSO_MIN_VERSION = "0.9.0";
 
 export type Api = typeof api;

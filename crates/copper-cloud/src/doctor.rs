@@ -203,7 +203,91 @@ async fn check_database(r: &mut Report, cfg: &Config) {
             ),
         );
     }
+    check_sso(r, cfg, &pool).await;
     pool.close().await;
+}
+
+/// Single sign-on providers and agent integrations (database only, no provider calls).
+async fn check_sso(r: &mut Report, cfg: &Config, pool: &sqlx::PgPool) {
+    use copper_cloud_core::sso;
+    let (Ok(providers), Ok(password)) = (
+        sso::list_providers(pool).await,
+        sso::password_signin(pool).await,
+    ) else {
+        return;
+    };
+    if providers.is_empty() {
+        r.line(
+            if password { Level::Ok } else { Level::Warn },
+            "sso",
+            if password {
+                "not set up (docs/sso.md)"
+            } else {
+                "not set up, but password sign-in is off: nobody can sign in"
+            },
+        );
+    }
+    for p in &providers {
+        let secret = match (p.has_secret, p.kind) {
+            (true, _) => "secret stored",
+            (false, sso::ProviderKind::Oidc) => "public client",
+            (false, sso::ProviderKind::Google) => "client secret MISSING",
+        };
+        let level = if p.enabled && !p.usable() {
+            Level::Warn
+        } else {
+            Level::Ok
+        };
+        r.line(
+            level,
+            "sso",
+            format!(
+                "{} ({}) {}, {secret}, domains {}{}",
+                p.id,
+                p.kind.as_str(),
+                if p.enabled { "enabled" } else { "disabled" },
+                p.domains.join(", "),
+                if p.auto_create {
+                    ""
+                } else {
+                    ", existing accounts only"
+                }
+            ),
+        );
+    }
+    if let Some(p) = providers.iter().find(|p| p.usable()) {
+        r.line(Level::Ok, "sso", format!("share {}", sso::start_url(cfg)));
+        r.line(
+            Level::Ok,
+            "sso",
+            format!("join link {}", sso::join_link(cfg, &p.id)),
+        );
+    } else if !providers.is_empty() && !password {
+        r.line(
+            Level::Warn,
+            "sso",
+            "no provider is enabled and password sign-in is off: nobody can sign in",
+        );
+    }
+    if !password {
+        r.line(Level::Ok, "sso", "password sign-in off (admins unaffected)");
+    }
+    let integrations: Result<(i64, i64), _> = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE revoked_at IS NULL),
+                (SELECT count(*) FROM devices WHERE agent_integration_id IS NOT NULL)
+         FROM agent_integrations",
+    )
+    .fetch_one(pool)
+    .await;
+    if let Ok((active, devices)) = integrations {
+        if active > 0 || devices > 0 {
+            r.line(
+                Level::Ok,
+                "agents",
+                format!("{active} active integration(s), {devices} agent device(s)"),
+            );
+        }
+    }
 }
 
 fn check_tls(r: &mut Report, cfg: &Config) {
@@ -239,50 +323,70 @@ fn check_tls(r: &mut Report, cfg: &Config) {
                     "ACME TLS-ALPN-01 needs the server reachable on port 443",
                 );
             }
-        }
-        TlsMode::SelfSigned => {
-            match tls::cert_info(&cfg.tls.cert_path) {
-                Ok(info) => {
-                    let now = time::OffsetDateTime::now_utc();
-                    let days_left = (info.not_after - now).whole_days();
-                    let level = if days_left < 0 {
-                        Level::Fail
-                    } else if days_left < 30 {
-                        Level::Warn
-                    } else {
-                        Level::Ok
-                    };
+            if cfg.tls.fallback_self_signed {
+                check_self_signed(r, cfg, false);
+                let at = |c: copper_cloud_core::link::LinkCode| format!("{}:{}", c.host, c.port);
+                if let (Ok(legacy), Ok(onboarding)) = (
+                    tls::link_code(cfg).map(at),
+                    tls::onboarding_link(cfg).map(at),
+                ) {
                     r.line(
-                        level,
+                        Level::Ok,
                         "tls",
-                        format!(
-                            "self-signed, fp={}, {} days left, names: {}",
-                            info.fingerprint,
-                            days_left,
-                            info.names.join(", ")
-                        ),
+                        format!("hybrid: link-code/pairing keep {legacy} + fp; SSO, /start and agent links use {onboarding} without fp"),
                     );
-                    let host = cfg.public_host();
-                    if !info.names.iter().any(|n| n.eq_ignore_ascii_case(host)) {
-                        r.line(
-                        Level::Warn,
-                        "tls",
-                        format!("certificate does not name public host {host} (pinning still works)"),
-                    );
-                    }
-                    if let Err(err) =
-                        tls::server_config_from_files(&cfg.tls.cert_path, &cfg.tls.key_path)
-                    {
-                        r.line(Level::Fail, "tls", format!("{err:#}"));
-                    }
                 }
-                Err(err) => r.line(
-                    Level::Fail,
-                    "tls",
-                    format!("{err:#} — run `copper-cloud tls-init`"),
-                ),
             }
         }
+        TlsMode::SelfSigned => check_self_signed(r, cfg, true),
+    }
+}
+
+/// The self-signed certificate (`self-signed` mode, or the hybrid TLS fallback).
+fn check_self_signed(r: &mut Report, cfg: &Config, primary: bool) {
+    let what = if primary {
+        "self-signed"
+    } else {
+        "fallback self-signed (IP / no-SNI clients)"
+    };
+    match tls::cert_info(&cfg.tls.cert_path) {
+        Ok(info) => {
+            let now = time::OffsetDateTime::now_utc();
+            let days_left = (info.not_after - now).whole_days();
+            let level = if days_left < 0 {
+                Level::Fail
+            } else if days_left < 30 {
+                Level::Warn
+            } else {
+                Level::Ok
+            };
+            r.line(
+                level,
+                "tls",
+                format!(
+                    "{what}, fp={}, {} days left, names: {}",
+                    info.fingerprint,
+                    days_left,
+                    info.names.join(", ")
+                ),
+            );
+            let host = cfg.public_host();
+            if primary && !info.names.iter().any(|n| n.eq_ignore_ascii_case(host)) {
+                r.line(
+                    Level::Warn,
+                    "tls",
+                    format!("certificate does not name public host {host} (pinning still works)"),
+                );
+            }
+            if let Err(err) = tls::server_config_from_files(&cfg.tls.cert_path, &cfg.tls.key_path) {
+                r.line(Level::Fail, "tls", format!("{err:#}"));
+            }
+        }
+        Err(err) => r.line(
+            Level::Fail,
+            "tls",
+            format!("{err:#} — run `copper-cloud tls-init`"),
+        ),
     }
 }
 

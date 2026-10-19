@@ -472,6 +472,7 @@ async fn signup(
     JsonBody(req): JsonBody<SignupRequest, AUTH_BODY_LIMIT>,
 ) -> ApiResult<Json<SessionResponse>> {
     let email = normalize_email(&req.email)?;
+    require_password_signin(&state).await?;
     validate_password(&req.password)?;
     let display_name = clean_name(req.display_name.as_deref(), 200)
         .unwrap_or_else(|| default_display_name(&email));
@@ -495,7 +496,7 @@ async fn signup(
         &state.crypto,
         &email,
         &display_name,
-        &password_hash,
+        Some(&password_hash),
     )
     .await?;
     let device = upsert_device(&mut tx, user.id, req.device).await?;
@@ -511,13 +512,14 @@ async fn signup(
 }
 
 /// Insert a user with a fresh wrapped data key. `email` must already be normalized and
-/// `password_hash` produced by [`hash_password`]. 409 if the email is taken.
+/// `password_hash` produced by [`hash_password`] (`None`: an SSO-only account that cannot
+/// sign in with a password). 409 if the email is taken.
 pub async fn insert_user(
     conn: &mut sqlx::PgConnection,
     crypto: &Crypto,
     email: &str,
     display_name: &str,
-    password_hash: &str,
+    password_hash: Option<&str>,
 ) -> ApiResult<UserView> {
     let wrapped = crypto.wrap_key(&Crypto::new_key());
     sqlx::query_as::<_, UserView>(
@@ -546,6 +548,27 @@ pub fn default_display_name(email: &str) -> String {
     email.split('@').next().unwrap_or_default().to_owned()
 }
 
+/// 401 `sso_only`: the account has no password (created by single sign-on).
+fn sso_only() -> ApiError {
+    ApiError::coded(
+        axum::http::StatusCode::UNAUTHORIZED,
+        "sso_only",
+        "this account signs in with single sign-on (e.g. \"Continue with Google\"), not a password",
+    )
+}
+
+/// 403 `password_signin_disabled` when the admin turned password sign-in off (SSO only).
+async fn require_password_signin(state: &SharedState) -> ApiResult<()> {
+    if crate::sso::password_signin(&state.db).await? {
+        Ok(())
+    } else {
+        Err(ApiError::Denied {
+            code: "password_signin_disabled",
+            message: "password sign-in is turned off on this instance; use single sign-on",
+        })
+    }
+}
+
 fn email_taken() -> ApiError {
     ApiError::Conflict(json!({ "message": "an account with this email already exists" }))
 }
@@ -554,16 +577,22 @@ async fn login(
     State(state): State<SharedState>,
     JsonBody(req): JsonBody<LoginRequest, AUTH_BODY_LIMIT>,
 ) -> ApiResult<Json<SessionResponse>> {
+    require_password_signin(&state).await?;
     if req.password.len() > MAX_PASSWORD_BYTES {
         return Err(ApiError::Unauthorized("credentials"));
     }
-    let row: Option<(Uuid, String, bool)> = sqlx::query_as(
+    let row: Option<(Uuid, Option<String>, bool)> = sqlx::query_as(
         "SELECT id, password_hash, disabled FROM users WHERE lower(email) = lower($1)",
     )
     .bind(req.email.trim())
     .fetch_optional(&state.db)
     .await?;
-    let ok = verify_password(req.password, row.as_ref().map(|r| r.1.clone())).await?;
+    // An SSO-only account still burns one (dummy) Argon2 verify, like an unknown email.
+    let ok = verify_password(req.password, row.as_ref().and_then(|r| r.1.clone())).await?;
+    if row.as_ref().is_some_and(|r| r.1.is_none()) {
+        tracing::info!("login refused: SSO-only account");
+        return Err(sso_only());
+    }
     let Some((user_id, _, disabled)) = row.filter(|_| ok) else {
         tracing::info!("login failed");
         return Err(ApiError::Unauthorized("credentials"));
@@ -653,11 +682,12 @@ async fn change_password(
     JsonBody(req): JsonBody<PasswordRequest, AUTH_BODY_LIMIT>,
 ) -> ApiResult<Json<serde_json::Value>> {
     validate_password(&req.new)?;
-    let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+    let hash: Option<String> = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
         .bind(user.user_id)
         .fetch_one(&state.db)
         .await?;
-    if req.old.len() > MAX_PASSWORD_BYTES || !verify_password(req.old, Some(hash)).await? {
+    // SSO-only accounts have no password to change (`None` never verifies).
+    if req.old.len() > MAX_PASSWORD_BYTES || !verify_password(req.old, hash).await? {
         return Err(ApiError::Unauthorized("credentials"));
     }
     let new_hash = hash_password(req.new).await?;
