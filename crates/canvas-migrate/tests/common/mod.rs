@@ -1,5 +1,5 @@
 //! Test harness: an isolated schema per test in the native PostgreSQL test database
-//! (`CCMIG_TEST_DATABASE_URL`, default `postgres://farce@localhost:5433/ccmig_test`) with
+//! (`COPPER_CLOUD_TEST_MIGRATE_DATABASE_URL`, default `postgres://localhost:5432/copper_cloud_test_migrate`) with
 //! copper-cloud's real migrations applied, legacy canvas rows seeded through the same sealing
 //! code paths the old `copper-cloud-canvas` crate used, and the mock Canvas Cloud.
 
@@ -21,10 +21,11 @@ use uuid::Uuid;
 use yrs::updates::decoder::Decode as _;
 use yrs::{Doc, Map as _, ReadTxn as _, StateVector, Transact as _, Update};
 
-pub const DEFAULT_DATABASE_URL: &str = "postgres://farce@localhost:5433/ccmig_test";
+pub const DEFAULT_DATABASE_URL: &str = "postgres://localhost:5432/copper_cloud_test_migrate";
 
 pub fn database_url() -> String {
-    std::env::var("CCMIG_TEST_DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned())
+    std::env::var("COPPER_CLOUD_TEST_MIGRATE_DATABASE_URL")
+        .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned())
 }
 
 /// The ledger table as cc-link's `0030_canvas_link.sql` defines it (created here only if the
@@ -53,9 +54,7 @@ impl TestDb {
             .acquire_timeout(Duration::from_secs(10))
             .connect_with(base.clone())
             .await
-            .expect(
-                "connecting to the test database (createdb -w -h localhost -p 5433 ccmig_test)",
-            );
+            .expect("connecting to the test database (createdb -w copper_cloud_test_migrate)");
         sweep_stale_schemas(&admin).await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

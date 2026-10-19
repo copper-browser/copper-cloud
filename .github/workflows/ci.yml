@@ -63,7 +63,7 @@ jobs:
           sudo sed -i '1i host all all 127.0.0.1/32 trust\nhost all all ::1/128 trust' "$HBA"
           sudo -u postgres psql -qc 'SELECT pg_reload_conf()'
           createdb -h localhost copper_cloud_test_core
-          createdb -h localhost ccmig_test
+          createdb -h localhost copper_cloud_test_migrate
           psql -h localhost -d copper_cloud_test_core -tAc 'SELECT version()'
       # Build the portal first so the portal tests run against the real export.
       - uses: oven-sh/setup-bun@v2
@@ -77,8 +77,6 @@ jobs:
             echo "no portal/package.json; the binary serves the 'portal not built' page"
           fi
       - name: cargo test
-        env:
-          CCMIG_TEST_DATABASE_URL: postgres://localhost:5432/ccmig_test
         run: cargo test --workspace --locked -j4 -- --test-threads=4
       - name: CLI smoke test
         run: |

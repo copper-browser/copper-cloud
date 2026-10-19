@@ -6,7 +6,11 @@
 //! * [`provision_user`] — one `PUT …/users/{subject}` (JIT after `401 unknown_user`).
 //! * [`reconcile_loop`] — every 10 min (and whenever the link changes): push users whose
 //!   email / display name / disabled flag changed (a hash per user is kept in memory),
-//!   disconnect newly disabled users, delete app users whose Copper account is gone.
+//!   disconnect newly disabled users, and *count* (log) app users whose Copper account is
+//!   gone. Reconcile never deletes anything: an old copper-cloud backup restored over a
+//!   newer database would otherwise wipe the newer users' canvases on Canvas Cloud. Removing
+//!   those orphans is an explicit operator action ([`prune_orphans`],
+//!   `copper-cloud canvas sync-users --prune`).
 //! * The outbox (`canvas_link_outbox`): admin edits/deletes enqueue work in their own
 //!   transaction ([`enqueue_user_changed`], [`enqueue_user_deleted`]); [`outbox_loop`] pushes
 //!   it and retries failures with backoff, so nothing is lost while Canvas Cloud is down.
@@ -303,7 +307,41 @@ pub async fn remote_users(
     Ok(out)
 }
 
-/// One reconcile pass. Returns `(pushed, disconnected, deleted)`.
+/// Canvas Cloud subjects of this app that have no Copper user any more.
+async fn orphan_ids(link: &CanvasLink, active: &Active) -> anyhow::Result<Vec<Uuid>> {
+    let users = copper_users(&link.state().db).await?;
+    let ours: HashSet<String> = users.iter().map(|u| u.id.to_string()).collect();
+    let remote = remote_users(&active.upstream, crate::upstream::REQUEST_TIMEOUT).await?;
+    Ok(remote
+        .keys()
+        .filter(|s| !ours.contains(*s))
+        .filter_map(|s| s.parse::<Uuid>().ok())
+        .collect())
+}
+
+/// Delete Canvas Cloud app users whose Copper account is gone (their canvases there go with
+/// them). Operator-initiated only (`copper-cloud canvas sync-users --prune`). Returns the ids
+/// deleted and the ids that failed.
+pub async fn prune_orphans(
+    link: &CanvasLink,
+    active: &Active,
+) -> anyhow::Result<(Vec<Uuid>, Vec<(Uuid, String)>)> {
+    let mut deleted = Vec::new();
+    let mut failed = Vec::new();
+    for id in orphan_ids(link, active).await? {
+        match delete_remote_user(&active.upstream, id).await {
+            Ok(()) => {
+                link.synced().remove(&id);
+                deleted.push(id);
+            }
+            Err(e) => failed.push((id, e.to_string())),
+        }
+    }
+    Ok((deleted, failed))
+}
+
+/// One reconcile pass. Returns `(pushed, disconnected, orphaned)`; orphans (Canvas Cloud app
+/// users with no Copper account) are only counted and logged, never deleted here.
 pub async fn reconcile_once(
     link: &CanvasLink,
     active: &Active,
@@ -333,25 +371,17 @@ pub async fn reconcile_once(
             disconnected += 1;
         }
     }
-    // App users whose Copper account is gone (e.g. `copper-cloud admin delete-user`).
-    let ours: HashSet<String> = users.iter().map(|u| u.id.to_string()).collect();
-    let remote = remote_users(&active.upstream, crate::upstream::REQUEST_TIMEOUT).await?;
-    let mut deleted = 0;
-    for subject in remote.keys().filter(|s| !ours.contains(*s)) {
-        let Ok(id) = subject.parse::<Uuid>() else {
-            continue;
-        };
-        match delete_remote_user(&active.upstream, id).await {
-            Ok(()) => {
-                deleted += 1;
-                link.synced().remove(&id);
-            }
-            Err(e) => {
-                tracing::warn!(user_id = %id, error = %e, "removing a deleted user from Canvas Cloud failed");
-            }
-        }
+    // App users whose Copper account is gone (e.g. deleted with the shell CLI, or a restore of
+    // an older database): report only.
+    let orphaned = orphan_ids(link, active).await?.len();
+    if orphaned > 0 {
+        tracing::warn!(
+            orphaned,
+            "Canvas Cloud has users of this Copper Cloud that no longer exist here; \
+             run `copper-cloud canvas sync-users --prune` to delete them and their canvases"
+        );
     }
-    Ok((report.provisioned, disconnected, deleted))
+    Ok((report.provisioned, disconnected, orphaned))
 }
 
 /// Background reconcile: right away, then every [`RECONCILE_EVERY`] and on link changes.
@@ -365,8 +395,8 @@ pub async fn reconcile_loop(link: CanvasLink) {
         if let Ok(Some(active)) = link.enabled().await {
             match reconcile_once(&link, &active).await {
                 Ok((0, 0, 0)) => {}
-                Ok((pushed, disconnected, deleted)) => {
-                    tracing::info!(pushed, disconnected, deleted, "canvas users reconciled");
+                Ok((pushed, disconnected, orphaned)) => {
+                    tracing::info!(pushed, disconnected, orphaned, "canvas users reconciled");
                 }
                 Err(err) => {
                     tracing::warn!(error = format!("{err:#}"), "canvas user reconcile failed");

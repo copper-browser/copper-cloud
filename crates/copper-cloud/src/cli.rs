@@ -98,7 +98,12 @@ pub enum CanvasCommand {
     /// Show the link (key masked) and whether Canvas Cloud is reachable.
     Status,
     /// Provision every user on the linked Canvas Cloud now.
-    SyncUsers,
+    SyncUsers {
+        /// Also delete Canvas Cloud users of this link whose Copper account no longer exists
+        /// (and their canvases there). The background reconcile only reports them.
+        #[arg(long)]
+        prune: bool,
+    },
     /// Copy legacy canvases (this database's canvas tables) into the linked Canvas Cloud,
     /// verifying each by digest. Legacy rows are never modified.
     Migrate(CanvasMigrateArgs),
@@ -585,13 +590,30 @@ async fn canvas(cfg: Config, cmd: CanvasCommand) -> anyhow::Result<ExitCode> {
                     ExitCode::SUCCESS
                 })
             }
-            CanvasCommand::SyncUsers => {
+            CanvasCommand::SyncUsers { prune } => {
                 let active = link
                     .current()
                     .await
                     .map_err(api_err)?
                     .context("no Canvas Cloud is linked (copper-cloud canvas link …)")?;
-                sync_users(&link, &active).await
+                let code = sync_users(&link, &active).await?;
+                if !prune {
+                    return Ok(code);
+                }
+                let (deleted, failed) =
+                    copper_cloud_canvas_link::provision::prune_orphans(&link, &active).await?;
+                println!(
+                    "pruned {} Canvas Cloud user(s) with no Copper account",
+                    deleted.len()
+                );
+                for (id, err) in &failed {
+                    println!("  failed {id}: {err}");
+                }
+                Ok(if failed.is_empty() {
+                    code
+                } else {
+                    ExitCode::FAILURE
+                })
             }
             CanvasCommand::Migrate(args) => migrate_canvases(&state, &link, args).await,
         }

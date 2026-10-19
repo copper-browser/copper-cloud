@@ -242,7 +242,7 @@ async fn full_run_migrates_everything_verified() {
             .iter()
             .find(|p| p["subject"] == w.carol.to_string())
             .unwrap();
-        assert_eq!(carol["display_name"], "");
+        assert!(carol["display_name"].is_null(), "empty names go as null");
         assert_eq!(carol["id"], w.carol.to_string());
         let dave = s
             .user_payloads

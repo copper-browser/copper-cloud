@@ -1007,7 +1007,7 @@ async fn admin_canvases_overview_people_and_user_hooks() {
 }
 
 #[tokio::test]
-async fn reconcile_pushes_changes_and_removes_deleted_users() {
+async fn reconcile_pushes_changes_and_only_reports_deleted_users() {
     let (s, _c, m, ana, bob) = setup().await;
     let active = s.link.enabled().await.unwrap().unwrap();
 
@@ -1035,14 +1035,22 @@ async fn reconcile_pushes_changes_and_removes_deleted_users() {
         .execute(&s.state.db)
         .await
         .unwrap();
-    let (pushed, disconnected, deleted) =
+    let (pushed, disconnected, orphaned) =
         copper_cloud_canvas_link::provision::reconcile_once(&s.link, &active)
             .await
             .unwrap();
-    assert_eq!((pushed, disconnected, deleted), (2, 1, 1));
+    assert_eq!((pushed, disconnected, orphaned), (2, 1, 1));
     assert_eq!(m.st.user(&ana.user_id).unwrap().email, "ana2@example.com");
     assert!(m.st.user(&carol.user_id).unwrap().disabled);
     assert!(m.st.disconnects.lock().unwrap().contains(&carol.user_id));
+    // Reconcile never deletes: bob (gone from Copper) is still on Canvas Cloud...
+    assert!(m.st.has_user(&bob.user_id));
+    // ...until an operator prunes explicitly.
+    let (deleted, failed) = copper_cloud_canvas_link::provision::prune_orphans(&s.link, &active)
+        .await
+        .unwrap();
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(deleted.len(), 1);
     assert!(!m.st.has_user(&bob.user_id));
 }
 

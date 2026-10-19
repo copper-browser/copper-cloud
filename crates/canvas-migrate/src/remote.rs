@@ -107,7 +107,8 @@ pub(crate) struct Imported {
 struct BatchUser<'a> {
     subject: String,
     email: &'a str,
-    display_name: &'a str,
+    /// `null` when empty, exactly like the link's provisioning (no needless updates).
+    display_name: Option<&'a str>,
     disabled: bool,
     id: Uuid,
 }
@@ -204,7 +205,7 @@ impl<'a> Remote<'a> {
                 "users": chunk.iter().map(|u| BatchUser {
                     subject: subject(u.id),
                     email: &u.email,
-                    display_name: &u.display_name,
+                    display_name: Some(u.display_name.as_str()).filter(|n| !n.is_empty()),
                     disabled: u.disabled,
                     id: u.id,
                 }).collect::<Vec<_>>(),
