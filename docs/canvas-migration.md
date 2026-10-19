@@ -78,27 +78,29 @@ All commands as root on the copper-cloud host unless noted. Every step can be re
 ### 0. Same-host Canvas Cloud (if not installed yet)
 
 The Canvas Cloud installer listens on `0.0.0.0:443` by default, which copper-cloud already
-uses. Install on another port, then move it to loopback with TLS off:
+uses. Install it on loopback with TLS off (Canvas Cloud 0.1.0's `install.sh`; on loopback it
+leaves the firewall alone):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/copper-browser/canvas-cloud/main/install.sh \
-  | sudo CANVAS_CLOUD_PORT=8480 sh
+  | sudo CANVAS_CLOUD_LISTEN=127.0.0.1:8480 CANVAS_CLOUD_TLS_MODE=off \
+         CANVAS_CLOUD_PUBLIC_URL=http://127.0.0.1:8480 sh
 ```
 
-Edit `/etc/canvas-cloud/canvas-cloud.toml` — set `listen` and add or change the two tables:
+By default the installer creates a separate `canvas_cloud` database on a native PostgreSQL
+on the same host. When copper-cloud uses a managed database (RDS), create a role and database
+for Canvas Cloud there and pass it instead: `DATABASE_URL=postgres://canvas_cloud:…@<host>:5432/canvas_cloud?sslmode=require`
+in the same environment (keep it off shell history, e.g. read it from a file).
 
-```toml
-listen = "127.0.0.1:8480"
+Then, in `/etc/canvas-cloud/canvas-cloud.toml`, let link shapes keep their `copper://` URLs
+(the generated file has the `[ops]` table with an empty list):
 
-[tls]
-mode = "off"
-
-[ops]
-extra_url_schemes = ["copper"]
+```sh
+sudo sed -i 's/^extra_url_schemes = \[\]$/extra_url_schemes = ["copper"]/' /etc/canvas-cloud/canvas-cloud.toml
+grep '^extra_url_schemes' /etc/canvas-cloud/canvas-cloud.toml    # extra_url_schemes = ["copper"]
 ```
 
 ```sh
-sudo ufw delete allow 8480/tcp 2>/dev/null || true     # the installer opened it (ufw/firewalld)
 sudo systemctl restart canvas-cloud
 timeout 10 curl -fsS http://127.0.0.1:8480/v1/info
 umask 077
@@ -106,9 +108,8 @@ sudo canvas-cloud apps create --name "Copper Cloud" --allow-import > /root/canva
 ```
 
 `apps create` prints only the key on stdout (the "created app <id>" line goes to stderr; note
-the id for `apps rotate` / `apps revoke`).
-
-The installer creates a separate `canvas_cloud` database on the same native PostgreSQL.
+the id for `apps rotate` / `apps revoke`). Back up `/etc/canvas-cloud/canvas-cloud.toml` (it
+holds Canvas Cloud's `master_key`) alongside copper-cloud's config.
 
 ### 1. Stop copper-cloud and back up
 
