@@ -20,6 +20,8 @@ import type {
   Settings,
   User,
 } from "./types";
+// Canvas Cloud link
+import type { CanvasLink } from "./types";
 
 const NOW = Date.now();
 const MIN = 60_000;
@@ -217,6 +219,74 @@ let canvases: CanvasRow[] = [
     };
   }),
 ];
+
+// Canvas Cloud link ---------------------------------------------------------
+// Canvases are served by a linked Canvas Cloud. Open any page with
+// `?mock-canvas=unlinked|unreachable|error` to start in that state instead.
+
+type CanvasScenario = "linked" | "unlinked" | "unreachable" | "error";
+const CANVAS_SCENARIO: CanvasScenario = (() => {
+  if (typeof location === "undefined") return "linked";
+  const v = new URLSearchParams(location.search).get("mock-canvas");
+  return v === "unlinked" || v === "unreachable" || v === "error" ? v : "linked";
+})();
+const CANVAS_URL = "https://canvas.hollis.studio";
+const CANVAS_VERSION = "0.1.0 (a41c9e2)";
+const LEGACY_CANVASES = 16;
+const CANVAS_DOWN_ERROR = "connect timeout after 5 s (canvas.hollis.studio:443)";
+
+const unlinkedCanvasLink = (migrations: CanvasLink["migrations"]): CanvasLink => ({
+  linked: false,
+  url: null,
+  enabled: false,
+  tls_fingerprint: null,
+  linked_at: null,
+  updated_at: null,
+  updated_by: null,
+  status: { reachable: null, version: null, error: null, checked_at: null },
+  bridge: { connected: false, last_event_at: null, last_error: null },
+  migrations,
+});
+
+/** True while the mock Canvas Cloud refuses connections. */
+let canvasHostDown = CANVAS_SCENARIO === "unreachable";
+let canvasLink: CanvasLink =
+  CANVAS_SCENARIO === "unlinked"
+    ? unlinkedCanvasLink({ migrated: 0, failed: 0, legacy_canvases: LEGACY_CANVASES })
+    : {
+        linked: true,
+        url: CANVAS_URL,
+        enabled: true,
+        tls_fingerprint: null,
+        linked_at: ago(6 * DAY + 3 * HOUR),
+        updated_at: ago(6 * DAY + 3 * HOUR),
+        updated_by: admin.email,
+        status: canvasHostDown
+          ? {
+              reachable: false,
+              version: null,
+              error: CANVAS_DOWN_ERROR,
+              checked_at: ago(2 * MIN),
+            }
+          : {
+              reachable: true,
+              version: CANVAS_VERSION,
+              error: null,
+              checked_at: ago(40_000),
+            },
+        bridge: canvasHostDown
+          ? {
+              connected: false,
+              last_event_at: ago(47 * MIN),
+              last_error: "connection refused, retrying in 30 s",
+            }
+          : { connected: true, last_event_at: ago(3 * MIN), last_error: null },
+        migrations: canvasHostDown
+          ? { migrated: 12, failed: 1, legacy_canvases: LEGACY_CANVASES }
+          : { migrated: 12, failed: 0, legacy_canvases: LEGACY_CANVASES },
+      };
+/** Canvases (and room counts) are only visible through a reachable link. */
+const canvasesServed = () => canvasLink.linked && canvasLink.enabled && !canvasHostDown;
 
 type KeyRow = Omit<AccessKey, "status">;
 
@@ -512,10 +582,10 @@ function overview(): Overview {
     counts: {
       users: users.length,
       devices: devices.length,
-      canvases: canvases.length,
+      canvases: canvasesServed() ? canvases.length : null,
       access_keys: keys.filter((k) => keyStatus(k) === "active").length,
-      live_rooms: 2,
-      live_peers: 3,
+      live_rooms: canvasesServed() ? 2 : null,
+      live_peers: canvasesServed() ? 3 : null,
     },
     public_url: HOST,
     tls: { mode: "self-signed", fingerprint: FINGERPRINT },
@@ -820,13 +890,24 @@ function route(
   }
 
   if (seg[0] === "canvases") {
+    if (canvasLink.linked && canvasHostDown) {
+      throw new HttpError(
+        502,
+        "canvas_upstream",
+        `the Canvas Cloud didn't answer: ${CANVAS_DOWN_ERROR}`,
+      );
+    }
+    if (method === "GET" && seg.length === 1 && !canvasLink.linked) {
+      return { ...paginate([], params), linked: false };
+    }
+    if (!canvasLink.linked) throw notFound();
     if (method === "GET" && seg.length === 1) {
       const kind = params.get("kind");
       const rows = [...canvases]
         .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
         .filter((c) => !kind || c.kind === kind)
         .map(toCanvas);
-      return paginate(rows, params);
+      return { ...paginate(rows, params), linked: true };
     }
     if (method === "DELETE" && seg.length === 2) {
       const row = canvases.find((c) => c.id === seg[1]);
@@ -834,6 +915,97 @@ function route(
       canvases = canvases.filter((c) => c !== row);
       record("canvas.delete", row.id, { name: row.name }, nowIso);
       return { ok: true };
+    }
+  }
+
+  // Canvas Cloud link -------------------------------------------------------
+  if (seg[0] === "canvas-link") {
+    if (CANVAS_SCENARIO === "error" && method === "GET") {
+      throw new HttpError(500, "internal", "couldn't unseal the stored Canvas Cloud key");
+    }
+    if (method === "GET" && seg.length === 1) return structuredClone(canvasLink);
+    if (method === "PUT" && seg.length === 1) {
+      const raw = String(body.url ?? "").trim();
+      const key = String(body.app_key ?? "").trim();
+      const fp = typeof body.tls_fingerprint === "string" ? body.tls_fingerprint : "";
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch {
+        throw bad("url must be an absolute https:// URL");
+      }
+      if (url.protocol !== "https:" && url.protocol !== "http:")
+        throw bad("url must be an absolute https:// URL");
+      if (
+        url.protocol === "http:" &&
+        !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+      ) {
+        throw bad("http:// is only allowed for loopback hosts; use https://");
+      }
+      if (!key) throw bad("app_key is required");
+      if (fp && !/^[0-9a-f]{64}$/.test(fp))
+        throw bad("tls_fingerprint must be a SHA-256 hex digest (64 characters)");
+      if (url.hostname.endsWith(".invalid") || url.hostname.startsWith("down."))
+        throw bad(`can't reach ${url.host}: connection refused`);
+      if (!key.startsWith("cva_"))
+        throw bad(`${url.host} rejected the app key (401 unknown_app)`);
+      canvasHostDown = false;
+      canvasLink = {
+        linked: true,
+        url: url.origin,
+        enabled: true,
+        tls_fingerprint: fp || null,
+        linked_at: canvasLink.linked ? canvasLink.linked_at : nowIso,
+        updated_at: nowIso,
+        updated_by: admin.email,
+        status: {
+          reachable: true,
+          version: CANVAS_VERSION,
+          error: null,
+          checked_at: nowIso,
+        },
+        bridge: {
+          connected: true,
+          last_event_at: canvasLink.bridge.last_event_at,
+          last_error: null,
+        },
+        migrations: { ...canvasLink.migrations },
+      };
+      record(
+        "canvas_link.set",
+        "canvas_link",
+        { url: url.origin, via: "admin_api" },
+        nowIso,
+      );
+      return structuredClone(canvasLink);
+    }
+    if (method === "DELETE" && seg.length === 1) {
+      if (!canvasLink.linked) throw notFound();
+      const url = canvasLink.url;
+      canvasHostDown = false;
+      canvasLink = unlinkedCanvasLink({ ...canvasLink.migrations });
+      record("canvas_link.remove", "canvas_link", { url, via: "admin_api" }, nowIso);
+      return { ok: true };
+    }
+    if (method === "POST" && seg[1] === "test") {
+      if (!canvasLink.linked) throw bad("no Canvas Cloud is linked");
+      const ok = !canvasHostDown;
+      const latency = ok ? 38 + Math.round(Math.random() * 60) : null;
+      canvasLink.status = ok
+        ? { reachable: true, version: CANVAS_VERSION, error: null, checked_at: nowIso }
+        : {
+            reachable: false,
+            version: null,
+            error: CANVAS_DOWN_ERROR,
+            checked_at: nowIso,
+          };
+      record("canvas_link.test", "canvas_link", { ok, latency_ms: latency }, nowIso);
+      return {
+        ok,
+        version: ok ? CANVAS_VERSION : null,
+        latency_ms: latency,
+        error: ok ? null : CANVAS_DOWN_ERROR,
+      };
     }
   }
 

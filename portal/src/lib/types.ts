@@ -54,11 +54,13 @@ export interface PasswordChanged extends Ok {
 export interface Counts {
   users: number;
   devices: number;
-  canvases: number;
+  /** From the linked Canvas Cloud; `null` while none is linked or it is unreachable. */
+  canvases: number | null;
   /** Active keys only (not revoked, expired or exhausted). */
   access_keys: number;
-  live_rooms: number;
-  live_peers: number;
+  /** Canvas Cloud rooms; `null` while none is linked or it is unreachable. */
+  live_rooms: number | null;
+  live_peers: number | null;
 }
 
 export interface Overview {
@@ -225,6 +227,66 @@ export interface Canvas {
 
 export interface CanvasQuery extends PageQuery {
   kind?: CanvasKind;
+}
+
+// Canvas Cloud link (canvases live on a linked Canvas Cloud server) -------
+
+/** `GET canvases`: the usual page, plus whether a Canvas Cloud is linked at all. */
+export interface CanvasPage extends Page<Canvas> {
+  /** `false` = no Canvas Cloud linked; the page is then always empty. */
+  linked: boolean;
+}
+
+export interface CanvasLinkStatus {
+  /** `null` until the server has checked once. */
+  reachable: boolean | null;
+  version: string | null;
+  error: string | null;
+  checked_at: string | null;
+}
+
+export interface CanvasLinkBridge {
+  connected: boolean;
+  last_event_at: string | null;
+  last_error: string | null;
+}
+
+export interface CanvasLinkMigrations {
+  migrated: number;
+  failed: number;
+  /** Canvases still stored on this server from before Canvas Cloud. */
+  legacy_canvases: number;
+}
+
+/** `GET canvas-link`. The app key is write-only and never comes back. */
+export interface CanvasLink {
+  linked: boolean;
+  url: string | null;
+  enabled: boolean;
+  /** SHA-256 hex of a pinned self-signed certificate, else `null`. */
+  tls_fingerprint: string | null;
+  linked_at: string | null;
+  updated_at: string | null;
+  /** Admin email, or `"cli"` for `copper-cloud canvas link`. */
+  updated_by: string | null;
+  status: CanvasLinkStatus;
+  bridge: CanvasLinkBridge;
+  migrations: CanvasLinkMigrations;
+}
+
+/** `PUT canvas-link`: always send the key; the server validates before saving. */
+export interface CanvasLinkUpdate {
+  url: string;
+  app_key: string;
+  tls_fingerprint?: string;
+}
+
+/** `POST canvas-link/test`. */
+export interface CanvasLinkTest {
+  ok: boolean;
+  version: string | null;
+  latency_ms: number | null;
+  error: string | null;
 }
 
 // Pairing codes -----------------------------------------------------------

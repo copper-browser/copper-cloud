@@ -13,7 +13,6 @@ import type {
   AccessKeyQuery,
   ApiErrorBody,
   AuditEntry,
-  Canvas,
   CanvasQuery,
   CreateAccessKey,
   CreatedAccessKey,
@@ -37,6 +36,8 @@ import type {
   UserPatch,
   UserQuery,
 } from "./types";
+// Canvas Cloud link
+import type { CanvasLink, CanvasLinkTest, CanvasLinkUpdate, CanvasPage } from "./types";
 
 export const API_BASE = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/+$/, "");
 export const MOCK_MODE = process.env.NEXT_PUBLIC_MOCK === "1";
@@ -280,9 +281,18 @@ export const api = {
   // Canvases (metadata only; content is never exposed)
   canvases: {
     list: (q?: CanvasQuery, signal?: AbortSignal) =>
-      request<Page<Canvas>>("canvases", { query: { ...page(q), kind: q?.kind }, signal }),
+      request<CanvasPage>("canvases", { query: { ...page(q), kind: q?.kind }, signal }),
     remove: (canvasId: string) =>
       request<Ok>(`canvases/${id(canvasId)}`, { method: "DELETE" }),
+  },
+
+  // Canvas Cloud link (the server canvases are served from; the key is write-only)
+  canvasLink: {
+    get: (signal?: AbortSignal) => request<CanvasLink>("canvas-link", { signal }),
+    set: (input: CanvasLinkUpdate) =>
+      request<CanvasLink>("canvas-link", { method: "PUT", body: input }),
+    remove: () => request<Ok>("canvas-link", { method: "DELETE" }),
+    test: () => request<CanvasLinkTest>("canvas-link/test", { method: "POST" }),
   },
 
   // Pairing codes (active only)
