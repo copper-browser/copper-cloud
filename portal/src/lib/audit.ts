@@ -31,6 +31,8 @@ export interface AuditLine {
 }
 
 const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+/** `https://canvas.example.com/` → `canvas.example.com` (Canvas Cloud audit rows). */
+const linkHost = (url: string) => url.replace(/^https?:\/\//, "").replace(/\/+$/, "");
 
 /** Turn an `admin_audit` row into a readable sentence fragment. */
 export function describeAudit(entry: AuditEntry, self: boolean): AuditLine {
@@ -96,6 +98,27 @@ export function describeAudit(entry: AuditEntry, self: boolean): AuditLine {
       return { icon: "device", verb: "removed a device" };
     case "canvas.delete":
       return { icon: "canvas", verb: "deleted canvas", object: str(d.name) };
+    // Canvas Cloud link ------------------------------------------------------
+    case "canvas_link.set":
+      return {
+        icon: "canvas",
+        verb: str(d.url) ? "linked the Canvas Cloud at" : "linked a Canvas Cloud",
+        object: str(d.url) ? linkHost(str(d.url)!) : undefined,
+        actor: d.via === "cli" ? "The server CLI" : undefined,
+      };
+    case "canvas_link.remove":
+      return {
+        icon: "canvas",
+        verb: str(d.url) ? "unlinked the Canvas Cloud at" : "unlinked the Canvas Cloud",
+        object: str(d.url) ? linkHost(str(d.url)!) : undefined,
+        actor: d.via === "cli" ? "The server CLI" : undefined,
+      };
+    case "canvas_link.test":
+      return {
+        icon: "canvas",
+        verb: "tested the Canvas Cloud link",
+        suffix: d.ok === true ? "(reachable)" : d.ok === false ? "(failed)" : undefined,
+      };
     case "intelligence.update": {
       const parts: string[] = [];
       if (d.jev === null) parts.push("removed the Jev key");

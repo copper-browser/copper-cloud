@@ -24,6 +24,8 @@ pub struct TestServer {
     pub addr: SocketAddr,
     pub base: String,
     pub state: SharedState,
+    /// The app's canvas link (settings reload, outbox kick, shutdown close).
+    pub link: copper_cloud_canvas_link::CanvasLink,
     pub http: reqwest::Client,
     _guard: MutexGuard<'static, ()>,
 }
@@ -48,7 +50,7 @@ pub async fn start_with(f: impl FnOnce(&mut Config)) -> TestServer {
     }
     truncate_all(&pool).await;
     let state = AppState::new(pool, cfg);
-    let app = copper_cloud::build_app(state.clone());
+    let (app, link) = copper_cloud::build_app_with_link(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -63,6 +65,7 @@ pub async fn start_with(f: impl FnOnce(&mut Config)) -> TestServer {
         addr,
         base: format!("http://{addr}"),
         state,
+        link,
         http: reqwest::Client::new(),
         _guard: guard,
     }

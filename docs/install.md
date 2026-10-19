@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 From a release tarball (files at the archive root):
 
 ```sh
-tar xzf copper-cloud-0.10.0-linux-aarch64.tar.gz
+tar xzf copper-cloud-0.11.0-linux-aarch64.tar.gz
 sudo ./install.sh
 ```
 
@@ -67,7 +67,7 @@ data stay.
 | `COPPER_CLOUD_MASTER_KEY` | generated | base64url of exactly 32 bytes |
 | `COPPER_CLOUD_BINARY` | — | local binary or release tarball |
 | `COPPER_CLOUD_BINARY_URL` | — | URL of a binary or release tarball |
-| `COPPER_CLOUD_VERSION` | `latest` | GitHub release to fetch (e.g. `0.10.0`) |
+| `COPPER_CLOUD_VERSION` | `latest` | GitHub release to fetch (e.g. `0.11.0`) |
 | `GITHUB_TOKEN` | — | for a private GitHub repository |
 
 `sudo -E` (or `sudo VAR=… sh install.sh`) is needed to pass variables through sudo.
@@ -152,3 +152,18 @@ in the proxy. Link codes then carry an `fp` only if `tls.cert_path` points at th
 certificate; with a publicly trusted proxy certificate clients use normal validation. The proxy
 must pass `X-Copper-Instance`, allow long-lived responses (SSE: disable buffering) and
 WebSocket upgrades on `/v1/canvases/*/ws`.
+
+## Canvases (Canvas Cloud)
+
+Since 0.11.0 canvases are served by a linked [Canvas Cloud](https://github.com/copper-browser/canvas-cloud).
+A fresh install runs without one (canvas routes answer `503 canvas_unavailable`; `doctor`
+warns). Install Canvas Cloud — on the same host listening on `127.0.0.1` with TLS off is the
+small setup — create an app key with `canvas-cloud apps create --name "Copper Cloud"
+--allow-import`, then:
+
+```sh
+sudo copper-cloud canvas link --url http://127.0.0.1:8480 --key-file /root/canvas-app.key
+```
+
+Steps and Canvas Cloud settings: [canvas-link.md › Linking](canvas-link.md#linking) and
+[canvas-migration.md › Same-host Canvas Cloud](canvas-migration.md#0-same-host-canvas-cloud-if-not-installed-yet).

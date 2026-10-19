@@ -40,6 +40,8 @@ pub const FEATURES: &[&str] = &[
     "agent_pairing",
     // `GET /v1/addons` + `GET /v1/addons/{id}/bundle/{sha256}` (0.10.0).
     "addons",
+    // Canvases are served by a linked Canvas Cloud (0.11.0; see `canvas` in `/v1/info`).
+    "canvas_link",
 ];
 
 /// Core `/v1` routes (auth, pairing, devices, sync, intelligence, info). Paths are relative to `/v1`.

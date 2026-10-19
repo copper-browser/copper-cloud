@@ -1,9 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/canvas", "crates/copper-cloud"]
+members = [
+  "crates/core",
+  "crates/canvas-link",
+  "crates/canvas-migrate",
+  "crates/copper-cloud",
+]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/copper-browser/copper-cloud"
@@ -28,7 +33,8 @@ must_use_candidate = "allow"
 # which keeps x86_64 + aarch64 cross builds simple.
 [workspace.dependencies]
 copper-cloud-core = { path = "crates/core" }
-copper-cloud-canvas = { path = "crates/canvas" }
+copper-cloud-canvas-link = { path = "crates/canvas-link" }
+copper-cloud-canvas-migrate = { path = "crates/canvas-migrate" }
 
 anyhow = "1"
 thiserror = "2"
@@ -92,8 +98,12 @@ rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess
 # backend) and Stored are the only methods accepted.
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
-# HTTP client: SSO provider calls (core) and the test suites
+# HTTP client: SSO provider calls (core), the canvas link (HTTP + WebSocket client to a
+# linked Canvas Cloud; rustls `ring`, no aws-lc) and the test suites
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+url = "2"
+webpki-roots = "1"
 
 [profile.release]
 lto = "thin"

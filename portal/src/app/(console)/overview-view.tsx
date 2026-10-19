@@ -161,8 +161,31 @@ export function OverviewView() {
   );
 }
 
+/**
+ * Why the canvas tiles are `null`: the overview only says "no number", so ask the
+ * Canvas Cloud link (only when a tile is actually missing).
+ */
+function useCanvasGap(counts: Counts | undefined): string | undefined {
+  const missing =
+    !!counts &&
+    (counts.canvases === null ||
+      counts.live_rooms === null ||
+      counts.live_peers === null);
+  const link = useResource(missing ? "overview:canvas-link" : null, (signal) =>
+    api.canvasLink.get(signal),
+  );
+  if (!missing) return undefined;
+  if (link.data) {
+    if (!link.data.linked) return "Not linked";
+    if (link.data.status.reachable === false) return "Unreachable";
+    return "Unavailable";
+  }
+  return link.error ? "Unavailable" : undefined;
+}
+
 function StatStrip({ counts }: { counts: Counts | undefined }) {
   const liveNow = (counts?.live_peers ?? 0) > 0;
+  const canvasGap = useCanvasGap(counts);
   return (
     <div className="grid grid-cols-3 gap-px overflow-hidden rounded-lg border bg-border @3xl:grid-cols-6">
       {STATS.map((s) => {
@@ -193,6 +216,26 @@ function StatStrip({ counts }: { counts: Counts | undefined }) {
             </span>
             {value === undefined ? (
               <Skeleton className="mt-2.5 mb-1 h-5 w-10" />
+            ) : value === null ? (
+              <span className="mt-1 flex flex-wrap items-baseline gap-x-2">
+                <span
+                  className="text-[22px]/8 font-semibold text-faint"
+                  aria-hidden="true"
+                >
+                  —
+                </span>
+                {/* The reason shows once, on the Canvases tile; the live tiles say it
+                    to screen readers only. */}
+                <span
+                  className={cn(
+                    "text-xs text-muted-foreground",
+                    (s.key !== "canvases" || !canvasGap) && "sr-only",
+                  )}
+                >
+                  <span className="sr-only">No count. Canvas Cloud: </span>
+                  {canvasGap ?? "Unavailable"}
+                </span>
+              </span>
             ) : (
               <span className="mt-1 block text-[22px]/8 font-semibold tracking-[-0.02em] tabular-nums">
                 {formatCount(value)}

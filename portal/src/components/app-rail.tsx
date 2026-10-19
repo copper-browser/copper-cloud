@@ -1,5 +1,6 @@
 "use client";
 
+import { CloudIcon } from "lucide-react"; // Canvas Cloud nav item
 import {
   BotIcon,
   FrameIcon,
@@ -35,6 +36,7 @@ const NAV = [
   { href: "/sso/", label: "Single sign-on", icon: ShieldCheckIcon },
   { href: "/integrations/", label: "Agent access", icon: BotIcon },
   { href: "/canvases/", label: "Canvases", icon: FrameIcon },
+  { href: "/canvas-cloud/", label: "Canvas Cloud", icon: CloudIcon },
   { href: "/intelligence/", label: "AI keys", icon: SparklesIcon },
   { href: "/addons/", label: "Addons", icon: PuzzleIcon },
   { href: "/settings/", label: "Settings", icon: SettingsIcon },

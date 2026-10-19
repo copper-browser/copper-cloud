@@ -72,7 +72,7 @@ async fn instance_gate() {
     assert_eq!(r.status(), 401);
     assert_eq!(r.json::<Value>().await.unwrap()["error"], "session");
 
-    // The canvas router is mounted under the same gate + auth.
+    // The canvas proxy is mounted under the same gate + auth (unlinked here: 503).
     let r = s.http.get(s.url("/v1/canvases")).send().await.unwrap();
     assert_eq!(r.status(), 401);
     assert_eq!(r.json::<Value>().await.unwrap()["error"], "instance_key");
@@ -84,7 +84,11 @@ async fn instance_gate() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200);
+    assert_eq!(r.status(), 503);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"],
+        "canvas_unavailable"
+    );
 }
 
 #[tokio::test]

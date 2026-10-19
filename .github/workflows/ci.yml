@@ -63,7 +63,7 @@ jobs:
           sudo sed -i '1i host all all 127.0.0.1/32 trust\nhost all all ::1/128 trust' "$HBA"
           sudo -u postgres psql -qc 'SELECT pg_reload_conf()'
           createdb -h localhost copper_cloud_test_core
-          createdb -h localhost copper_cloud_test_canvas
+          createdb -h localhost copper_cloud_test_migrate
           psql -h localhost -d copper_cloud_test_core -tAc 'SELECT version()'
       # Build the portal first so the portal tests run against the real export.
       - uses: oven-sh/setup-bun@v2

@@ -78,6 +78,64 @@ pub enum Command {
     /// uploaded here and handed to everyone or to listed people.
     #[command(subcommand)]
     Addons(crate::admin_addons_cli::AddonsCommand),
+    /// Link to a Canvas Cloud server (where canvases live), check it, provision users and
+    /// migrate legacy canvases into it.
+    #[command(subcommand)]
+    Canvas(CanvasCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CanvasCommand {
+    /// Link (or re-link) a Canvas Cloud: checks /v1/info and /v1/apps/self/stats with the
+    /// app key, stores the key encrypted, then provisions every user. A running server picks
+    /// the change up within seconds.
+    Link {
+        /// Canvas Cloud base URL: https://… (http:// only for a loopback host).
+        #[arg(long, value_name = "URL")]
+        url: String,
+        /// File holding the Canvas Cloud app key (cva_…); "-" reads stdin. Never argv.
+        #[arg(long, value_name = "FILE")]
+        key_file: PathBuf,
+        /// SHA-256 of a self-signed Canvas Cloud's certificate (hex, colons allowed).
+        #[arg(long, value_name = "HEX")]
+        fingerprint: Option<String>,
+        /// Do not provision users now (the server's reconcile loop does it later).
+        #[arg(long)]
+        no_sync: bool,
+    },
+    /// Remove the link (canvas routes answer 503 canvas_unavailable until linked again).
+    Unlink,
+    /// Show the link (key masked) and whether Canvas Cloud is reachable.
+    Status,
+    /// Provision every user on the linked Canvas Cloud now.
+    SyncUsers {
+        /// Also delete Canvas Cloud users of this link whose Copper account no longer exists
+        /// (and their canvases there). The background reconcile only reports them.
+        #[arg(long)]
+        prune: bool,
+    },
+    /// Copy legacy canvases (this database's canvas tables) into the linked Canvas Cloud,
+    /// verifying each by digest. Legacy rows are never modified.
+    Migrate(CanvasMigrateArgs),
+}
+
+#[derive(Args, Debug, Default)]
+pub struct CanvasMigrateArgs {
+    /// Read, decrypt and count everything without sending it.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Only this canvas (repeatable); re-sends it even if already migrated.
+    #[arg(long = "only", value_name = "ID")]
+    pub only: Vec<uuid::Uuid>,
+    /// Replace canvases that already exist on Canvas Cloud (from an earlier import).
+    #[arg(long)]
+    pub replace: bool,
+    /// Canvases migrated in parallel.
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=16))]
+    pub concurrency: u16,
+    /// Print the report as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -562,7 +620,216 @@ pub fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             runtime()?.block_on(crate::admin_addons_cli::run(cfg, cmd))?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Canvas(cmd) => {
+            let cfg = load_config(cli.config)?;
+            runtime()?.block_on(canvas(cfg, cmd))
+        }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// `copper-cloud canvas …`
+
+#[allow(clippy::needless_pass_by_value)] // used as `map_err(api_err)`
+fn api_err(e: copper_cloud_core::error::ApiError) -> anyhow::Error {
+    anyhow::anyhow!("{e}")
+}
+
+/// Read the app key from `path` (`-` = stdin), validated, never printed.
+fn read_app_key(path: &std::path::Path) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    let raw = zeroize::Zeroizing::new(if path.as_os_str() == "-" {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut s)
+            .context("reading the app key from stdin")?;
+        s
+    } else {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("reading the app key from {}", path.display()))?
+    });
+    copper_cloud_canvas_link::settings::clean_app_key(&raw).map_err(api_err)
+}
+
+async fn canvas(cfg: Config, cmd: CanvasCommand) -> anyhow::Result<ExitCode> {
+    use copper_cloud_canvas_link::admin::{self as link_admin, Actor};
+    use copper_cloud_canvas_link::{settings, CanvasLink};
+
+    // Read the key before touching the database (fail fast).
+    let key = match &cmd {
+        CanvasCommand::Link { key_file, .. } => Some(read_app_key(key_file)?),
+        _ => None,
+    };
+    let pool = copper_cloud_core::db::connect(&cfg).await?;
+    let state = copper_cloud_core::state::AppState::new(pool.clone(), cfg);
+    let link = CanvasLink::new(state.clone());
+    let result = async {
+        match cmd {
+            CanvasCommand::Link {
+                url,
+                fingerprint,
+                no_sync,
+                ..
+            } => {
+                let key = key.unwrap_or_default();
+                let active =
+                    link_admin::set(&link, &Actor::Cli, &url, &key, fingerprint.as_deref())
+                        .await
+                        .map_err(api_err)?;
+                let health = link.health();
+                println!(
+                    "linked {} (Canvas Cloud {}, key …{})",
+                    active.settings.base(),
+                    health.version.as_deref().unwrap_or("?"),
+                    settings::last4(&active.settings.app_key)
+                );
+                if no_sync {
+                    println!("users not provisioned (--no-sync); the server's reconcile loop will");
+                    return Ok(ExitCode::SUCCESS);
+                }
+                sync_users(&link, &active).await
+            }
+            CanvasCommand::Unlink => {
+                match link_admin::remove(&link, &Actor::Cli)
+                    .await
+                    .map_err(api_err)?
+                {
+                    Some(url) => println!("unlinked {url}"),
+                    None => println!("no Canvas Cloud was linked"),
+                }
+                Ok(ExitCode::SUCCESS)
+            }
+            CanvasCommand::Status => {
+                let view = link_admin::view(&link).await.map_err(api_err)?;
+                print_status(&view);
+                let reachable = view["status"]["reachable"].as_bool();
+                Ok(if view["linked"] == true && reachable != Some(true) {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                })
+            }
+            CanvasCommand::SyncUsers { prune } => {
+                let active = link
+                    .current()
+                    .await
+                    .map_err(api_err)?
+                    .context("no Canvas Cloud is linked (copper-cloud canvas link …)")?;
+                let code = sync_users(&link, &active).await?;
+                if !prune {
+                    return Ok(code);
+                }
+                let (deleted, failed) =
+                    copper_cloud_canvas_link::provision::prune_orphans(&link, &active).await?;
+                println!(
+                    "pruned {} Canvas Cloud user(s) with no Copper account",
+                    deleted.len()
+                );
+                for (id, err) in &failed {
+                    println!("  failed {id}: {err}");
+                }
+                Ok(if failed.is_empty() {
+                    code
+                } else {
+                    ExitCode::FAILURE
+                })
+            }
+            CanvasCommand::Migrate(args) => migrate_canvases(&state, &link, args).await,
+        }
+    }
+    .await;
+    pool.close().await;
+    result
+}
+
+async fn migrate_canvases(
+    state: &copper_cloud_core::state::SharedState,
+    link: &copper_cloud_canvas_link::CanvasLink,
+    args: CanvasMigrateArgs,
+) -> anyhow::Result<ExitCode> {
+    let active = link
+        .current()
+        .await
+        .map_err(api_err)?
+        .context("no Canvas Cloud is linked (copper-cloud canvas link …)")?;
+    let opts = copper_cloud_canvas_migrate::MigrateOptions {
+        dry_run: args.dry_run,
+        only: args.only,
+        replace: args.replace,
+        concurrency: usize::from(args.concurrency),
+        json: args.json,
+    };
+    let report = copper_cloud_canvas_migrate::run(
+        &state.db,
+        &state.crypto,
+        active.upstream.client(),
+        &active.settings.url,
+        &active.settings.app_key,
+        opts,
+    )
+    .await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{report}");
+    }
+    Ok(if report.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+async fn sync_users(
+    link: &copper_cloud_canvas_link::CanvasLink,
+    active: &copper_cloud_canvas_link::Active,
+) -> anyhow::Result<ExitCode> {
+    let report = copper_cloud_canvas_link::provision::sync_all(link, active).await?;
+    println!(
+        "provisioned {}/{} users on Canvas Cloud",
+        report.provisioned, report.total
+    );
+    for (id, err) in &report.failed {
+        println!("  failed {id}: {err}");
+    }
+    for id in &report.id_mismatch {
+        println!(
+            "  {id}: Canvas Cloud linked an existing account with a different id (chat author ids will not match)"
+        );
+    }
+    Ok(if report.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn print_status(v: &serde_json::Value) {
+    let s = |v: &serde_json::Value| v.as_str().map_or_else(|| "-".to_owned(), str::to_owned);
+    if v["linked"] == true {
+        println!("canvas link: {}", s(&v["url"]));
+        println!("  enabled:      {}", v["enabled"]);
+        println!("  pinned cert:  {}", s(&v["tls_fingerprint"]));
+        println!("  linked at:    {}", s(&v["linked_at"]));
+        println!(
+            "  updated:      {} by {}",
+            s(&v["updated_at"]),
+            s(&v["updated_by"])
+        );
+        match v["status"]["reachable"].as_bool() {
+            Some(true) => println!(
+                "  reachable:    yes (Canvas Cloud {})",
+                s(&v["status"]["version"])
+            ),
+            Some(false) => println!("  reachable:    NO — {}", s(&v["status"]["error"])),
+            None => println!("  reachable:    unknown"),
+        }
+    } else {
+        println!("canvas link: not linked (canvas routes answer 503 canvas_unavailable)");
+    }
+    let m = &v["migrations"];
+    println!(
+        "  migrations:   {} migrated, {} failed, {} legacy canvases",
+        m["migrated"], m["failed"], m["legacy_canvases"]
+    );
 }
 
 fn tls_init(cfg: &Config, force: bool, extra: &[String]) -> anyhow::Result<()> {
@@ -780,6 +1047,65 @@ mod tests {
             args.extend_from_slice(&bad);
             assert!(parse(&args).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn canvas_flags() {
+        let cli = Cli::try_parse_from([
+            "copper-cloud",
+            "canvas",
+            "link",
+            "--url",
+            "http://127.0.0.1:8480",
+            "--key-file",
+            "-",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Canvas(CanvasCommand::Link { no_sync: false, .. }))
+        ));
+        // Keys are never accepted on argv.
+        assert!(Cli::try_parse_from([
+            "copper-cloud",
+            "canvas",
+            "link",
+            "--url",
+            "https://c.example",
+            "--key",
+            "cva_x"
+        ])
+        .is_err());
+        let cli = Cli::try_parse_from([
+            "copper-cloud",
+            "canvas",
+            "migrate",
+            "--dry-run",
+            "--only",
+            "00000000-0000-0000-0000-000000000001",
+            "--only",
+            "00000000-0000-0000-0000-000000000002",
+            "--concurrency",
+            "4",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Canvas(CanvasCommand::Migrate(a))) = cli.command else {
+            panic!("parsed as {:?}", cli.command);
+        };
+        assert!(a.dry_run && a.json && !a.replace);
+        assert_eq!(a.only.len(), 2);
+        assert_eq!(a.concurrency, 4);
+        for sub in ["unlink", "status", "sync-users"] {
+            assert!(
+                Cli::try_parse_from(["copper-cloud", "canvas", sub]).is_ok(),
+                "{sub}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["copper-cloud", "canvas", "migrate", "--concurrency", "0"])
+                .is_err()
+        );
     }
 
     #[test]

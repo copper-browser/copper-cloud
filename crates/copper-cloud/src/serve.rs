@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use axum_server::Handle;
+use copper_cloud_canvas_link::CanvasLink;
 use copper_cloud_core::config::Config;
 use copper_cloud_core::state::AppState;
 use copper_cloud_core::{db, observe, shutdown, tls};
@@ -75,9 +76,9 @@ pub async fn run(cfg: Config, migrate: bool) -> anyhow::Result<()> {
     }
 
     let handle: Handle<SocketAddr> = Handle::new();
-    tokio::spawn(shutdown_on_signal(handle.clone()));
+    let (app, link) = crate::build_app_with_link(state);
+    tokio::spawn(shutdown_on_signal(handle.clone(), link));
 
-    let app = crate::build_app(state);
     let result = tls::serve(app, &cfg, handle).await;
     shutdown::trigger();
     pool.close().await;
@@ -107,7 +108,7 @@ async fn connect_with_retry(cfg: &Config) -> anyhow::Result<sqlx::PgPool> {
     }
 }
 
-async fn shutdown_on_signal(handle: Handle<SocketAddr>) {
+async fn shutdown_on_signal(handle: Handle<SocketAddr>, link: CanvasLink) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -130,9 +131,9 @@ async fn shutdown_on_signal(handle: Handle<SocketAddr>) {
         grace_secs = GRACE.as_secs(),
         "shutdown signal received; draining"
     );
-    // End SSE streams and tell canvas peers we are going away (close 1001) so the drain
-    // does not wait on long-lived connections.
+    // End SSE streams and close the proxied canvas WebSockets (1001 to Copper, a clean close
+    // to Canvas Cloud) so the drain does not wait on long-lived connections.
     shutdown::trigger();
-    copper_cloud_canvas::close_all_rooms();
+    link.close_all();
     handle.graceful_shutdown(Some(GRACE));
 }

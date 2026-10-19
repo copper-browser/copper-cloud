@@ -1,6 +1,7 @@
 "use client";
 
-import { FrameIcon, LockIcon } from "lucide-react";
+import { CircleAlertIcon, CloudOffIcon, FrameIcon, LockIcon } from "lucide-react";
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -17,19 +18,36 @@ import { RelativeTime } from "@/components/relative-time";
 import { RowActions } from "@/components/row-actions";
 import { Segmented } from "@/components/segmented";
 import { useSession } from "@/components/session-provider";
+import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { useList } from "@/hooks/use-list";
-import { api } from "@/lib/api";
+import { api, ApiError, errorMessage } from "@/lib/api";
 import { formatCount, matches, plural } from "@/lib/format";
 import type { Canvas, CanvasKind } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type KindFilter = "all" | CanvasKind;
 
-export function CanvasesView() {
-  const list = useList<Canvas>("canvases", (offset, limit, signal) =>
-    api.canvases.list({ offset, limit }, signal),
+/** Where the table would be, for states with no table to show. */
+function CanvasCloudState({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="border-t px-3 py-10 text-sm">
+      <div className="mx-auto max-w-md">{children}</div>
+    </div>
   );
+}
+
+export function CanvasesView() {
+  // `linked: false` = no Canvas Cloud is linked, so there is nothing to list.
+  const [linked, setLinked] = useState<boolean>();
+  const list = useList<Canvas>("canvases", async (offset, limit, signal) => {
+    const page = await api.canvases.list({ offset, limit }, signal);
+    setLinked(page.linked !== false);
+    return page;
+  });
+  const errorCode = list.error instanceof ApiError ? list.error.code : undefined;
+  const notLinked = linked === false || errorCode === "canvas_unavailable";
+  const upstreamDown = !notLinked && errorCode === "canvas_upstream";
   const { refreshOverview } = useSession();
   const [filter, setFilter] = useState("");
   const [kind, setKind] = useState<KindFilter>("all");
@@ -143,68 +161,118 @@ export function CanvasesView() {
         description="Names, owners and members only. Canvas content never reaches the admin console."
       />
 
-      <TableToolbar
-        filter={filter}
-        onFilterChange={setFilter}
-        placeholder="Filter by name or owner"
-        count={list.loading ? undefined : plural(rows.length, "canvas", "canvases")}
-      >
-        <Segmented
-          label="Kind"
-          value={kind}
-          onChange={setKind}
-          options={[
-            { value: "all", label: "All" },
-            { value: "shared", label: "Shared", count: sharedCount },
-            {
-              value: "personal",
-              label: "Personal",
-              count: list.items.length - sharedCount,
-            },
-          ]}
-        />
-      </TableToolbar>
+      {notLinked ? (
+        <CanvasCloudState>
+          <EmptyState
+            icon={CloudOffIcon}
+            title="No Canvas Cloud linked"
+            action={
+              <Button render={<Link href="/canvas-cloud/" />} nativeButton={false}>
+                Link a Canvas Cloud
+              </Button>
+            }
+          >
+            Canvases live on a Canvas Cloud server. Until one is linked, Copper users
+            can&rsquo;t open canvases. Nothing has been deleted.
+          </EmptyState>
+        </CanvasCloudState>
+      ) : upstreamDown ? (
+        <CanvasCloudState>
+          <div className="flex items-start gap-3">
+            <CircleAlertIcon
+              className="mt-0.5 size-4 shrink-0 text-destructive"
+              aria-hidden="true"
+            />
+            <div className="min-w-0">
+              <p className="font-medium text-foreground">
+                Can&rsquo;t reach the Canvas Cloud
+              </p>
+              <p className="mt-0.5 text-pretty wrap-break-word text-muted-foreground">
+                {errorMessage(list.error)}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" onClick={list.reload}>
+                  Try again
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  render={<Link href="/canvas-cloud/" />}
+                  nativeButton={false}
+                >
+                  Check the link
+                </Button>
+              </div>
+            </div>
+          </div>
+        </CanvasCloudState>
+      ) : (
+        <>
+          <TableToolbar
+            filter={filter}
+            onFilterChange={setFilter}
+            placeholder="Filter by name or owner"
+            count={list.loading ? undefined : plural(rows.length, "canvas", "canvases")}
+          >
+            <Segmented
+              label="Kind"
+              value={kind}
+              onChange={setKind}
+              options={[
+                { value: "all", label: "All" },
+                { value: "shared", label: "Shared", count: sharedCount },
+                {
+                  value: "personal",
+                  label: "Personal",
+                  count: list.items.length - sharedCount,
+                },
+              ]}
+            />
+          </TableToolbar>
 
-      <DataTable
-        label="Canvases"
-        columns={columns}
-        rows={rows}
-        rowKey={(c) => c.id}
-        loading={list.loading}
-        error={list.error}
-        onRetry={list.reload}
-        filtered={!!filter || kind !== "all"}
-        empty={
-          <EmptyState icon={FrameIcon} title="No canvases yet">
-            Each person gets a Personal canvas the first time they open Canvas in Copper.
-            Shared canvases appear when someone creates one and invites others.
-          </EmptyState>
-        }
-        noMatches={
-          <EmptyState icon={FrameIcon} title="No canvases match">
-            Try another name or owner.{" "}
-            <button
-              type="button"
-              className="text-foreground underline underline-offset-4"
-              onClick={() => {
-                setFilter("");
-                setKind("all");
-              }}
-            >
-              Clear filters
-            </button>
-          </EmptyState>
-        }
-        footer={
-          <LoadMore
-            loaded={list.items.length}
-            total={list.total}
-            noun="canvases"
-            onLoadMore={list.loadMore}
-            loading={list.loadingMore}
+          <DataTable
+            label="Canvases"
+            columns={columns}
+            rows={rows}
+            rowKey={(c) => c.id}
+            loading={list.loading}
+            error={list.error}
+            onRetry={list.reload}
+            filtered={!!filter || kind !== "all"}
+            empty={
+              <EmptyState icon={FrameIcon} title="No canvases yet">
+                Each person gets a Personal canvas the first time they open Canvas in
+                Copper. Shared canvases appear when someone creates one and invites
+                others.
+              </EmptyState>
+            }
+            noMatches={
+              <EmptyState icon={FrameIcon} title="No canvases match">
+                Try another name or owner.{" "}
+                <button
+                  type="button"
+                  className="text-foreground underline underline-offset-4"
+                  onClick={() => {
+                    setFilter("");
+                    setKind("all");
+                  }}
+                >
+                  Clear filters
+                </button>
+              </EmptyState>
+            }
+            footer={
+              <LoadMore
+                loaded={list.items.length}
+                total={list.total}
+                noun="canvases"
+                onLoadMore={list.loadMore}
+                loading={list.loadingMore}
+              />
+            }
           />
-        }
-      />
+        </>
+      )}
 
       <ConfirmDialog
         open={!!deleting}

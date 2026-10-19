@@ -120,7 +120,8 @@ rustls only (ring provider), TLS 1.2+ with rustls' safe defaults; HTTP/2 or HTTP
   SHA-256(token), so a DB leak does not yield usable sessions. Sliding 90-day expiry; expired
   rows are purged hourly. Password change revokes all other sessions; `admin reset-password`,
   `admin disable-user` and the portal's disable / reset-password revoke all (disable also
-  disconnects the user's live canvas peers).
+  disconnects the user's live canvas peers on the linked Canvas Cloud: at once from the portal,
+  within 10 minutes — the reconcile loop — from the CLI).
 - Rate limiting: `limits.auth_per_minute` (10) per client IP on `/v1/auth/*` (signup, login,
   logout, password, pair; `GET /v1/auth/me` and pairing-code management are exempt because a
   256-bit bearer token cannot be brute-forced and clients use them as status probes). IPv6
@@ -137,7 +138,9 @@ Every query that touches user data is filtered by the authenticated `user_id` (d
 devices, sessions); that includes history deletes, which also refuse unknown query parameters
 and malformed bodies so a typo cannot widen a delete to all of the caller's history.
 `tabs:<device_id>` docs are writable only by the owning device. Canvas
-access is checked per membership by the canvas crate. Share-link preview and join routes require
+access is checked per membership by the linked Canvas Cloud, for the Copper user that
+copper-cloud names in `X-Canvas-User` after verifying the session (see
+[Canvas link](#canvas-link)). Share-link preview and join routes require
 an active session; disabled accounts have no valid sessions and cannot use links. Link joins are
 serialized on the link row, use the membership primary key for idempotency, and never replace an
 existing owner role.
@@ -152,7 +155,26 @@ excluded.
 A random 32-byte secret is generated for every canvas share link, but only its SHA-256 digest is
 stored. The plaintext is returned only from link creation, never from list/preview responses and
 never in logs. Owners can revoke one or all links; deleting a canvas cascades its links. Email
-invite tokens follow the same digest-only storage rule.
+invite tokens follow the same digest-only storage rule. Since 0.11.0 both are stored by Canvas
+Cloud (the migration copies the digests, so existing tokens keep working).
+
+### Canvas link
+
+Since 0.11.0 canvases are stored and served by a linked Canvas Cloud; copper-cloud proxies to
+it with one app key ([canvas-link.md › Security model](canvas-link.md#security-model)):
+
+- Coppers authenticate only to copper-cloud. Their session token, `X-Copper-Instance` and
+  cookies are never forwarded; copper-cloud adds `Authorization: Bearer <app key>` and
+  `X-Canvas-User: <Copper user id>`, which Canvas Cloud trusts for this app's users.
+- **Whoever holds the app key can act as every Copper user on Canvas Cloud** (read, edit and
+  delete their canvases) and create, change or delete this app's users. It is stored in
+  `canvas_link.app_key_sealed` under the KEK envelope below (AAD `canvas_link:app_key`), never
+  returned by the admin API, shown only as its last four characters, read by the CLI from a
+  file or stdin (never argv), and kept out of logs and audit details.
+- TLS to Canvas Cloud is verified against the web PKI (bundled Mozilla roots) or pinned to one
+  leaf certificate SHA-256; plain `http://` is accepted only for a loopback address.
+- A Canvas Cloud `401` is turned into `502 canvas_upstream`, so an app-key problem never signs
+  Coppers out.
 
 ### Cloud-wide intelligence keys
 
@@ -183,12 +205,17 @@ next fetch; `updated_at` changes).
 ```
 master_key (config, 32 B) ──HKDF-SHA256(salt "copper-cloud", info "copper-cloud/v1/key-encryption-key")──▶ KEK
 KEK ──AES-256-GCM(aad "copper-cloud/v1/wrapped-key")──▶ users.data_key_wrapped, canvases.doc_key_wrapped,
-                                                        intelligence_settings.data_key_wrapped
+                                                        intelligence_settings.data_key_wrapped,
+                                                        canvas_link.data_key_wrapped
 data_key ──AES-256-GCM(nonce 12 B random, aad "<user_id>:<domain>")──▶ sync_docs.payload, history.payload
 intelligence data_key ──AES-256-GCM(aad "intelligence:jev" | "intelligence:router")──▶ jev_key_sealed, router_key_sealed
-canvas doc_key ──AES-256-GCM(aad canvas id)──▶ canvas_updates."update", canvas_snapshots.state (incl. chat)
-canvas doc_key ──AES-256-GCM(aad "copper-cloud/v1/mention:" ‖ mention id)──▶ canvas_mentions.excerpt_sealed
+canvas_link data_key ──AES-256-GCM(aad "canvas_link:app_key")──▶ canvas_link.app_key_sealed
+legacy (≤ 0.8) canvas doc_key ──AES-256-GCM(aad canvas id)──▶ canvas_updates."update", canvas_snapshots.state (incl. chat)
+legacy (≤ 0.8) canvas doc_key ──AES-256-GCM(aad "copper-cloud/v1/mention:" ‖ mention id)──▶ canvas_mentions.excerpt_sealed
 ```
+
+The legacy canvas rows are only read (by `canvas migrate`); new canvas content is encrypted by
+Canvas Cloud under its own `master_key`.
 
 - Sealed blob layout: `nonce(12) ‖ ciphertext ‖ tag(16)`.
 - AAD binds each blob to its user and domain: copying a row to another user or domain makes

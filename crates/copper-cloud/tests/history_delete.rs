@@ -661,6 +661,14 @@ async fn info_lists_features() {
             .contains(&json!("history_delete")),
         "{info}"
     );
+    assert!(
+        info["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("canvas_link")),
+        "{info}"
+    );
+    assert_eq!(info["canvas"], json!({ "linked": false }));
     assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
 }
 

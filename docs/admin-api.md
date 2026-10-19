@@ -97,8 +97,8 @@ cross-client contract fixes their shape.
 ### Audit
 
 Every mutation (login, logout, password, settings, AI keys, key create/revoke, user update /
-delete / reset-password, device delete, canvas delete, pairing-code revoke, SSO providers and
-settings, agent integrations) writes an
+delete / reset-password, device delete, canvas delete, Canvas Cloud link set / remove / test,
+pairing-code revoke, SSO providers and settings, agent integrations) writes an
 `admin_audit` row, readable with `GET audit`. Users fetching the AI keys are recorded too
 (`intelligence.read`).
 
@@ -179,6 +179,9 @@ redirect — check the code). `new` shorter than 10 chars → `400`.
 ```
 
 * `counts.access_keys` = **active** keys (not revoked, not expired, not exhausted).
+* `counts.canvases`, `counts.live_rooms`, `counts.live_peers` come from the linked Canvas
+  Cloud (`GET /v1/apps/self/stats`, 5 s budget) and are `null` when no Canvas Cloud is linked
+  or it does not answer.
 * `tls.mode`: `"self-signed" | "acme" | "off"`; `fingerprint` is `null` for ACME (publicly
   trusted) or when no certificate file is readable.
 
@@ -517,8 +520,9 @@ User object:
 ```
 
 `last_seen_at` = latest device activity (`null` if never). `canvas_count` = canvases the user
-is a member of (including their Personal canvas, which is created the first time their Copper
-lists canvases). There is no "create user" call: people sign up from Copper with the access
+is a member of on the linked Canvas Cloud (including their Personal canvas, which is created
+the first time their Copper lists canvases), read from `GET /v1/apps/self/users` and cached
+30 s; `null` when no Canvas Cloud is linked or it does not answer. There is no "create user" call: people sign up from Copper with the access
 key you gave them (directory mode) or the instance link code (open mode).
 
 ### `GET /admin/api/users?limit=&offset=&q=`
@@ -534,15 +538,18 @@ key you gave them (directory mode) or the instance link code (open mode).
 ```
 
 Disabling revokes all of the user's sessions immediately, disconnects their live canvas
-peers and blocks sign-in (`401 account_disabled` in Copper). `display_name` must not be empty.
+peers (queued to the linked Canvas Cloud: `disconnect_user`, plus `upsert_user` with
+`disabled: true` — [provisioning](canvas-link.md#user-provisioning)) and blocks sign-in (`401 account_disabled` in Copper). `display_name` must not be empty.
 Unknown id (or not a UUID) → `404`.
 
 ### `DELETE /admin/api/users/{id}`
 
 Permanently deletes the user and everything they own: sessions, devices, sync docs, history,
-pairing codes, access keys bound to their email, their canvases (Personal and shared ones
-they own — including other members' access to them) and their memberships/invites. Live
-canvas rooms of deleted canvases are closed.
+pairing codes, access keys bound to their email, their legacy (pre-0.9) canvas rows and
+legacy invites addressed to their email. On the linked Canvas Cloud (queued in the same
+transaction, `delete_user`) their app user is deleted together with the canvases they own
+(Personal and shared — including other members' access to them) and their memberships;
+Canvas Cloud closes those rooms.
 
 ```json
 { "ok": true }
@@ -614,18 +621,83 @@ Canvas object (content is never exposed):
 `kind`: `"personal" | "shared"`. `share_link_count` counts active (not revoked) canvas
 share links; link tokens and canvas content are never exposed to the admin API.
 
+Canvases live on the linked Canvas Cloud; these endpoints read and delete them there
+(`/v1/apps/self/canvases`).
+
 ### `GET /admin/api/canvases?limit=&offset=&kind=`
 
-`kind` optional filter. Pagination envelope.
+`kind` optional filter (`personal` | `shared`, else `400`). Pagination envelope plus
+`linked`:
+
+```json
+{ "items": [ /* canvas objects */ ], "total": 15, "limit": 100, "offset": 0, "linked": true }
+```
+
+No Canvas Cloud linked → `200` with `items: []`, `total: 0`, `linked: false`. Linked but
+unreachable → `502 {"error":"canvas_upstream",…}`.
 
 ### `DELETE /admin/api/canvases/{id}`
 
-Deletes the canvas, its history, members and invites; connected peers are disconnected. A
-deleted Personal canvas is recreated empty the next time its owner opens it.
+Deletes the canvas on Canvas Cloud, with its history, members and invites; connected peers
+are disconnected (`4404`). A deleted Personal canvas is recreated empty the next time its
+owner opens it. Unknown id → `404`; no link → `503 canvas_unavailable`; unreachable →
+`502 canvas_upstream`.
 
 ```json
 { "ok": true }
 ```
+
+---
+
+## Canvas Cloud link
+
+The linked Canvas Cloud that serves canvases ([canvas-link.md](canvas-link.md#admin-api) has
+the full reference with examples).
+
+### `GET /admin/api/canvas-link`
+
+```json
+{
+  "linked": true,
+  "url": "http://127.0.0.1:8480",
+  "enabled": true,
+  "tls_fingerprint": null,
+  "linked_at": "2026-10-19T18:02:11Z",
+  "updated_at": "2026-10-19T18:02:11Z",
+  "updated_by": "cli",
+  "status": { "reachable": true, "version": "0.1.0", "error": null, "checked_at": "2026-10-19T18:30:00Z" },
+  "bridge": { "connected": true, "last_event_at": "2026-10-19T18:29:41Z", "last_error": null },
+  "migrations": { "migrated": 36, "failed": 0, "legacy_canvases": 36 }
+}
+```
+
+Re-probes when the last check is older than 15 s. Not linked: `linked: false`, `enabled:
+false`, the other fields `null`, `bridge.connected: false`. The app key is never returned.
+
+### `PUT /admin/api/canvas-link`
+
+```json
+// request
+{ "url": "https://canvas.example.com", "app_key": "cva_…", "tls_fingerprint": null }
+// 200 → the GET body
+```
+
+Probes `GET /v1/info` and `GET /v1/apps/self/stats` with the key first; nothing is stored if
+the input is invalid or the probe fails (`400 bad_request` with the reason). Users are
+provisioned in the background.
+
+### `DELETE /admin/api/canvas-link`
+
+`{ "ok": true }`. Canvas routes answer `503 canvas_unavailable` from then on; nothing on
+Canvas Cloud is deleted.
+
+### `POST /admin/api/canvas-link/test`
+
+```json
+{ "ok": true, "version": "0.1.0", "latency_ms": 4, "error": null }
+```
+
+Always `200`; `ok: false` with `error` when not linked or unreachable.
 
 ---
 

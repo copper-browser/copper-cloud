@@ -638,13 +638,14 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "copper-cloud"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "axum",
  "axum-server",
  "clap",
- "copper-cloud-canvas",
+ "copper-cloud-canvas-link",
+ "copper-cloud-canvas-migrate",
  "copper-cloud-core",
  "futures",
  "hex",
@@ -657,25 +658,29 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "tracing",
+ "url",
  "uuid",
  "zeroize",
  "zip",
 ]
 
 [[package]]
-name = "copper-cloud-canvas"
-version = "0.10.0"
+name = "copper-cloud-canvas-link"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.22.1",
+ "axum-server",
  "bytes",
  "copper-cloud-core",
  "futures",
- "governor",
+ "hex",
  "http-body-util",
  "metrics",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sqlx",
@@ -686,12 +691,37 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "webpki-roots 1.0.9",
+ "zeroize",
+]
+
+[[package]]
+name = "copper-cloud-canvas-migrate"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "copper-cloud-core",
+ "futures",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "time",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
  "yrs",
 ]
 
 [[package]]
 name = "copper-cloud-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3415,8 +3445,12 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -3612,6 +3646,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.21",
 ]

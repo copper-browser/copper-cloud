@@ -397,8 +397,8 @@ async fn people_devices_canvases_pairing_overview() {
     let ana = s.signup("ana@example.com", PASSWORD, &new_device()).await;
     let bob = s.signup("bob@example.com", PASSWORD, &new_device()).await;
 
-    // Ana: a second device, a sync doc, history, a pairing code, a shared canvas with Bob as
-    // member, a pending invite to someone else, an access key bound to her email.
+    // Ana: a second device, a sync doc, history, a pairing code, an access key bound to her
+    // email.
     let ana_d2 = new_device();
     assert_eq!(
         s.login("ana@example.com", PASSWORD, &ana_d2).await.status(),
@@ -424,46 +424,8 @@ async fn people_devices_canvases_pairing_overview() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    let canvas = json_of(
-        s.authed(Method::POST, "/v1/canvases", &ana)
-            .json(&json!({ "name": "Roadmap" }))
-            .send()
-            .await
-            .unwrap(),
-    )
-    .await;
-    let canvas_id = canvas["id"].as_str().unwrap().to_owned();
-    let inv = json_of(
-        s.authed(
-            Method::POST,
-            &format!("/v1/canvases/{canvas_id}/invites"),
-            &ana,
-        )
-        .json(&json!({ "email": "bob@example.com" }))
-        .send()
-        .await
-        .unwrap(),
-    )
-    .await;
-    let r = s
-        .authed(
-            Method::POST,
-            &format!("/v1/invites/{}/accept", inv["id"].as_str().unwrap()),
-            &bob,
-        )
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 200);
-    s.authed(
-        Method::POST,
-        &format!("/v1/canvases/{canvas_id}/invites"),
-        &ana,
-    )
-    .json(&json!({ "email": "carol@example.com" }))
-    .send()
-    .await
-    .unwrap();
+    // (Canvases live on a linked Canvas Cloud now — see tests/canvas_link.rs; this instance
+    // is not linked, so every canvas number is null and the canvas routes answer 503.)
     s.mint_key("Ana", Some("ana@example.com"), None).await;
     let (_, team_key) = s.mint_key("Team", None, None).await;
 
@@ -478,9 +440,9 @@ async fn people_devices_canvases_pairing_overview() {
     assert_eq!(ov["counts"]["users"], 2);
     assert_eq!(ov["counts"]["devices"], 3);
     assert_eq!(ov["counts"]["access_keys"], 2);
-    assert!(ov["counts"]["canvases"].as_i64().unwrap() >= 1);
-    assert!(ov["counts"]["live_rooms"].is_number());
-    assert!(ov["counts"]["live_peers"].is_number());
+    assert!(ov["counts"]["canvases"].is_null(), "no Canvas Cloud linked");
+    assert!(ov["counts"]["live_rooms"].is_null());
+    assert!(ov["counts"]["live_peers"].is_null());
     assert_eq!(ov["access_mode"], "open");
     assert_eq!(ov["public_url"], "localhost:8443");
     assert_eq!(ov["tls"]["mode"], "off");
@@ -502,7 +464,7 @@ async fn people_devices_canvases_pairing_overview() {
     );
     let ana_row = &users["items"][1];
     assert_eq!(ana_row["device_count"], 2);
-    assert!(ana_row["canvas_count"].as_i64().unwrap() >= 1);
+    assert!(ana_row["canvas_count"].is_null(), "no Canvas Cloud linked");
     assert!(ana_row["last_seen_at"].is_string());
     assert_eq!(ana_row["disabled"], false);
     let q = json_of(
@@ -625,7 +587,7 @@ async fn people_devices_canvases_pairing_overview() {
         .unwrap();
     assert_eq!(r.status(), 404);
 
-    // Canvases: listed without content; pairing codes listed.
+    // Canvases: unlinked → an empty list saying so; pairing codes listed.
     let cs = json_of(
         s.admin(Method::GET, "canvases?kind=shared", Some(&c))
             .send()
@@ -633,11 +595,9 @@ async fn people_devices_canvases_pairing_overview() {
             .unwrap(),
     )
     .await;
-    assert_eq!(cs["total"], 1);
-    assert_eq!(cs["items"][0]["name"], "Roadmap");
-    assert_eq!(cs["items"][0]["owner_email"], "ana@example.com");
-    assert_eq!(cs["items"][0]["member_count"], 2);
-    assert!(cs["items"][0].get("state").is_none());
+    assert_eq!(cs["total"], 0);
+    assert_eq!(cs["linked"], false);
+    assert_eq!(cs["items"], json!([]));
     let pc = json_of(
         s.admin(Method::GET, "pairing-codes", Some(&c))
             .send()
@@ -672,17 +632,6 @@ async fn people_devices_canvases_pairing_overview() {
             .unwrap();
         assert_eq!(n, 0, "{table}");
     }
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM canvas_members WHERE canvas_id = $1")
-        .bind(canvas_id.parse::<uuid::Uuid>().unwrap())
-        .fetch_one(&s.state.db)
-        .await
-        .unwrap();
-    assert_eq!(n, 0, "Bob's membership of Ana's canvas");
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM canvas_invites")
-        .fetch_one(&s.state.db)
-        .await
-        .unwrap();
-    assert_eq!(n, 0, "invites of deleted canvases");
     let keys: Vec<String> = sqlx::query_scalar("SELECT label FROM access_keys")
         .fetch_all(&s.state.db)
         .await
@@ -701,7 +650,8 @@ async fn people_devices_canvases_pairing_overview() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200);
+    assert_eq!(r.status(), 503);
+    assert_eq!(json_of(r).await["error"], "canvas_unavailable");
     let r = s
         .admin(Method::DELETE, &format!("users/{}", ana.user_id), Some(&c))
         .send()
@@ -709,27 +659,18 @@ async fn people_devices_canvases_pairing_overview() {
         .unwrap();
     assert_eq!(r.status(), 404);
 
-    // Delete Bob's Personal canvas: allowed for admins; it comes back empty on next use.
-    let personal = json_of(
-        s.admin(Method::GET, "canvases?kind=personal", Some(&c))
-            .send()
-            .await
-            .unwrap(),
-    )
-    .await;
-    let pid = personal["items"][0]["id"].as_str().unwrap().to_owned();
+    // Deleting a canvas needs a linked Canvas Cloud.
     let r = s
-        .admin(Method::DELETE, &format!("canvases/{pid}"), Some(&c))
+        .admin(
+            Method::DELETE,
+            &format!("canvases/{}", uuid::Uuid::now_v7()),
+            Some(&c),
+        )
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200);
-    let r = s
-        .admin(Method::DELETE, &format!("canvases/{pid}"), Some(&c))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 404);
+    assert_eq!(r.status(), 503);
+    assert_eq!(json_of(r).await["error"], "canvas_unavailable");
 
     // Pairing code revoke.
     let minted = json_of(
@@ -767,7 +708,6 @@ async fn people_devices_canvases_pairing_overview() {
         "user.reset_password",
         "device.delete",
         "user.delete",
-        "canvas.delete",
         "pairing_code.revoke",
     ] {
         assert!(actions.iter().any(|x| x == a), "{a} audited: {actions:?}");
