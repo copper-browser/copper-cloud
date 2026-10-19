@@ -12,8 +12,11 @@
 //!   those orphans is an explicit operator action ([`prune_orphans`],
 //!   `copper-cloud canvas sync-users --prune`).
 //! * The outbox (`canvas_link_outbox`): admin edits/deletes enqueue work in their own
-//!   transaction ([`enqueue_user_changed`], [`enqueue_user_deleted`]); [`outbox_loop`] pushes
-//!   it and retries failures with backoff, so nothing is lost while Canvas Cloud is down.
+//!   transaction ([`enqueue_user_changed`], [`enqueue_user_deleted`]), and every new account
+//!   is queued by the `canvas_link_user_created` trigger on `users` (migration 0030), whatever
+//!   inserted it (signup, SSO, `admin create-user`, another process); [`outbox_loop`] pushes
+//!   it (kicked, else every [`OUTBOX_POLL`]) and retries failures with backoff, so nothing is
+//!   lost while Canvas Cloud is down.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
@@ -31,7 +34,7 @@ use crate::{Active, CanvasLink};
 /// Reconcile period.
 pub const RECONCILE_EVERY: Duration = Duration::from_secs(600);
 /// Idle outbox poll (work is also kicked right after it is enqueued).
-pub const OUTBOX_POLL: Duration = Duration::from_secs(30);
+pub const OUTBOX_POLL: Duration = Duration::from_secs(5);
 /// Users per `users:batch` call (Canvas Cloud's limit).
 pub const BATCH: usize = 1000;
 /// Outbox items are dropped (with a warning) after this many failed attempts.

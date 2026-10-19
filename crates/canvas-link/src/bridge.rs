@@ -2,8 +2,10 @@
 //! `GET {url}/v1/apps/self/events` (`Last-Event-ID` resume, exponential backoff 1 s → 30 s).
 //! Each `canvas` event is re-published to the Copper user whose id is the event's `subject`
 //! as `Event::Canvas {canvas_id, kind}`, so Copper's `/v1/sync/events` stream carries the same
-//! `event: canvas` frames as before the split. `resync` is logged (clients refetch on their
-//! own); keep-alive comments only feed the idle watchdog.
+//! `event: canvas` frames as before the split. A `resync` (Canvas Cloud could not resume from
+//! our `Last-Event-ID`, e.g. after it restarted, so canvas events may have been missed) is
+//! passed on to every connected Copper user as `event: resync`, which Copper clients answer by
+//! refetching; keep-alive comments only feed the idle watchdog.
 
 use std::time::Duration;
 
@@ -284,7 +286,10 @@ async fn session(
                     link.update_bridge(|b| b.last_event_at = Some(OffsetDateTime::now_utc()));
                 }
                 "resync" => {
-                    tracing::info!("canvas event bridge: resync (events were missed)");
+                    tracing::info!("canvas event bridge: resync (events may have been missed); telling clients to refetch");
+                    state.events.publish_all(&Event::Resync {
+                        reason: "canvas".into(),
+                    });
                     link.update_bridge(|b| b.last_event_at = Some(OffsetDateTime::now_utc()));
                 }
                 _ => {}

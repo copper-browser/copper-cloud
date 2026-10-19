@@ -114,9 +114,9 @@ The installer creates a separate `canvas_cloud` database on the same native Post
 
 ```sh
 sudo systemctl stop copper-cloud
-sudo -u postgres pg_dump -Fc copper_cloud > /root/copper_cloud-pre-0.9-$(date +%F).dump
+sudo -u postgres pg_dump -Fc copper_cloud > /root/copper_cloud-pre-0.11-$(date +%F).dump
 # RDS: aws rds create-db-snapshot --db-instance-identifier copper-cloud-<name> \
-#        --db-snapshot-identifier copper-cloud-<name>-pre-0-9
+#        --db-snapshot-identifier copper-cloud-<name>-pre-0-11
 sudo -u postgres psql -w -d copper_cloud -Atc 'SELECT count(*) FROM canvases'   # legacy canvases
 ```
 
@@ -333,6 +333,8 @@ only.
 | `canvas exists in canvas-cloud but no digest is available (use --replace)` | the digest endpoint failed for an existing canvas; retry, or `--only ID --replace` |
 | `409 personal_exists … — the owner already has a non-empty Personal canvas in canvas-cloud (use --replace)` | the owner used canvases on Canvas Cloud before the migration (e.g. copper-cloud ran linked): `--only ID --replace` overwrites their Canvas Cloud Personal canvas with the legacy one |
 | `422 unknown_subject …` | a member/inviter/mention user is not provisioned (deleted between steps?): re-run |
+| `verification failed: GET digest: HTTP 500` | Canvas Cloud stored the canvas but cannot read it back. Canvas Cloud before 0.1.0 could store an unreadable snapshot of a text edited inside an emoji (a yrs bug); 0.1.0 verifies snapshots. Upgrade Canvas Cloud, then `--only ID --replace` |
+| `422 unverifiable_snapshot` | Canvas Cloud could not encode this canvas in a form that reads back identically (yrs bug with a text split inside an emoji); nothing was stored. The canvas stays on the legacy tables; report it with the canvas id |
 | `422 bad_update` / `422 incomplete_history` | a legacy update does not decode, or updates are missing: the legacy document is damaged. Check it with the dry run and `GET …/read` on the old release |
 | `413 …` | the canvas is bigger than Canvas Cloud's `limits.import_max_bytes` (default 512 MiB) or a line over `limits.import_max_line_bytes` (32 MiB): raise them on Canvas Cloud, restart it, re-run |
 | `reading the legacy canvas: update seq N does not decrypt` / `the snapshot (seq N) does not decrypt` | a damaged or foreign row in the legacy tables; nothing was imported for that canvas |
@@ -356,14 +358,16 @@ only.
 ## Rollback
 
 The legacy tables are untouched, so the previous release still has every canvas as it was at
-the moment of the migration.
+the moment of the migration. Make sure the new copper-cloud is fully stopped first
+(`systemctl is-active copper-cloud` says `inactive`); the SQL below works as the
+`postgres` superuser or as the database owner.
 
 ```sh
 sudo systemctl stop copper-cloud
 # Older releases refuse to start with a migration it does not know (sqlx: "migration 30 was previously
-# applied but is missing"): remove 0030's link tables and its record; keep the ledger.
+# applied but is missing"): remove 0030's trigger, link tables and record; keep the ledger.
 sudo -u postgres psql -w -d copper_cloud -v ON_ERROR_STOP=1 -c \
-  "BEGIN; DROP TABLE canvas_link_outbox; DROP TABLE canvas_link; DELETE FROM _sqlx_migrations WHERE version = 30; COMMIT;"
+  "BEGIN; DROP TRIGGER canvas_link_user_created ON users; DROP FUNCTION canvas_link_user_created(); DROP TABLE canvas_link_outbox; DROP TABLE canvas_link; DELETE FROM _sqlx_migrations WHERE version = 30; COMMIT;"
 tar xzf copper-cloud-0.10.0-linux-$(uname -m).tar.gz && sudo ./install.sh   # reinstall the previous release
 ```
 

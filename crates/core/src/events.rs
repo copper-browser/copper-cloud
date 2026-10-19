@@ -52,6 +52,10 @@ pub enum Event {
     /// Addons changed on this instance (admin upload / enable / audience / settings / delete);
     /// refetch `GET /v1/addons` with the last revision. Sent to every connected user.
     Addons,
+    /// Events may have been missed (a linked Canvas Cloud restarted, so its event stream
+    /// could not resume): refetch what you cache, as after a lagged stream. Sent to every
+    /// connected user as `event: resync`.
+    Resync { reason: String },
 }
 
 impl Event {
@@ -63,6 +67,7 @@ impl Event {
             Self::HistoryDeleted { .. } => "history_deleted",
             Self::Canvas { .. } => "canvas",
             Self::Addons => "addons",
+            Self::Resync { .. } => "resync",
         }
     }
 }

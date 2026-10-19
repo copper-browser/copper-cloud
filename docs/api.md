@@ -672,8 +672,10 @@ data: {"skipped":12}
   on/off, audience, settings, priority, version, delete): refetch
   [`GET /v1/addons`](#addons) with `If-None-Match` (cheap when nothing changed for you).
   Changes made with the server CLI send no event.
-- `resync`: this stream fell behind and dropped events; do a full pull
-  (`GET /v1/sync/docs` + history from your cursor).
+- `resync`: this stream fell behind and dropped events (`{"skipped":n}`), or a linked Canvas
+  Cloud's events may have been missed (`{"type":"resync","reason":"canvas"}`, 0.11.0, sent to
+  every connected user); do a full pull (`GET /v1/sync/docs` + history from your cursor) and
+  refetch canvases.
 - A `: keepalive` comment every 15 s. The stream ends on server shutdown, when the session is
   revoked (checked every 5 min), or on network loss — reconnect with backoff and re-pull.
 - Events carry no payloads; fetch the doc/history after an event. `canvas` kinds are listed in

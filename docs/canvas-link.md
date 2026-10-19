@@ -191,8 +191,11 @@ holds an SSE stream on `GET {url}/v1/apps/self/events` with the app key:
   ```
 
 - `Last-Event-ID` resume: the bridge sends the last event id it saw when it reconnects (reset
-  when the link points at a new URL). `event: resync` (events were missed) is logged only —
-  Copper refreshes its lists on its own `open`/`resync`.
+  when the link points at a new URL). When Canvas Cloud cannot resume from it (it restarted,
+  or the bridge was away longer than its 4096-event buffer) it sends `event: resync`; the
+  bridge then sends `event: resync` (`data: {"type":"resync","reason":"canvas"}`) to every
+  connected Copper user, who refetch as after a lagged stream, so no canvas change is missed
+  silently.
 - Reconnects with exponential backoff, 1 s → 30 s; treats 45 s without any bytes (Canvas
   Cloud sends a keep-alive every 15 s) as a dead stream; follows link changes within 5 s.
 
@@ -214,9 +217,9 @@ The `kind`s are Canvas Cloud's, unchanged from 0.8:
 
 Only users of this app receive events through the bridge, which is every Copper user.
 
-`GET /v1/people` lists **all** enabled Canvas Cloud users, not only this app's: a Canvas Cloud
-shared with other apps or with its own sign-ups shows those people to Coppers too (and they
-can be invited and mentioned).
+`GET /v1/people` is answered by Canvas Cloud for the signed-in user as this app's caller: it
+lists every other user linked to this app (every provisioned Copper account), never Canvas
+Cloud's own sign-ups or another app's users (Canvas Cloud's `docs/canvas.md`, `GET /people`).
 
 ## User provisioning
 
@@ -242,6 +245,7 @@ When users are pushed:
 |---|---|
 | link (`canvas link`, portal, `PUT /admin/api/canvas-link`) | every user, `users:batch` in chunks of 1000 (the CLI waits for it unless `--no-sync`; the admin API runs it in the background) |
 | `copper-cloud canvas sync-users [--prune]` | every user, now; with `--prune` also deletes Canvas Cloud users of this link whose Copper account no longer exists (and the canvases they own there) |
+| a new account (signup, SSO sign-in, `admin create-user`, admin portal) | queued in the creating transaction by the `canvas_link_user_created` trigger on `users` (migration 0030), so even another process's insert counts; pushed within seconds (the outbox is polled every 5 s) and retried while Canvas Cloud is down |
 | Canvas Cloud answers `401 unknown_user` to a proxied request | just-in-time `PUT` of that user, then the request is retried once (a user that no longer exists in Copper is deleted on Canvas Cloud instead) |
 | reconcile loop — at start, on every link change, then every 10 min | users whose email / display name / disabled flag changed since this process last pushed them (kept in memory, so after a restart everyone is pushed once); newly disabled users are also disconnected (`POST /v1/apps/self/users/{id}/disconnect`); app users whose Copper account no longer exists are only **counted and logged** (`canvas users reconciled … orphaned=N`) — reconcile never deletes, so restoring an older copper-cloud backup cannot wipe newer users' canvases; delete them deliberately with `canvas sync-users --prune` |
 | admin API `PATCH /admin/api/users/{id}` | outbox `upsert_user`, plus `disconnect_user` when it disables the user |

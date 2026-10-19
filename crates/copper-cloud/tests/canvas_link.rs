@@ -802,6 +802,40 @@ async fn event_bridge_feeds_sync_events() {
     let ev = next_event(&mut stream, &mut buf, "canvas").await;
     assert_eq!(ev["canvas_id"], canvas_id2.as_str());
     assert_eq!(ev["kind"], "deleted");
+
+    // Canvas Cloud could not resume (it restarted): every connected user is told to refetch.
+    let resp = s
+        .authed(Method::GET, "/v1/sync/events", &bob)
+        .send()
+        .await
+        .unwrap();
+    let mut bob_stream = resp.bytes_stream();
+    let mut bob_buf = String::new();
+    next_event(&mut bob_stream, &mut bob_buf, "ready").await;
+    m.st.publish_resync();
+    for (stream, buf) in [(&mut stream, &mut buf), (&mut bob_stream, &mut bob_buf)] {
+        let ev = next_event(stream, buf, "resync").await;
+        assert_eq!(ev, json!({ "type": "resync", "reason": "canvas" }));
+    }
+}
+
+/// Every new account is provisioned on Canvas Cloud within seconds, whichever path created
+/// it — here a direct insert, as `admin create-user` (another process) does.
+#[tokio::test]
+async fn new_users_are_provisioned_right_away() {
+    let (s, _c, m, _ana, _bob) = setup().await;
+    let mut conn = s.state.db.acquire().await.unwrap();
+    let email = format!("late-{}@example.com", uuid::Uuid::now_v7().simple());
+    let user =
+        copper_cloud_core::auth::insert_user(&mut conn, &s.state.crypto, &email, "Late", None)
+            .await
+            .unwrap();
+    drop(conn);
+    let id = user.id.to_string();
+    wait_for("new user provisioned", || {
+        m.st.user(&id).is_some_and(|u| u.email == email)
+    })
+    .await;
 }
 
 #[tokio::test]

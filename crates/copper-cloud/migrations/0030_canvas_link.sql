@@ -42,6 +42,21 @@ CREATE TABLE canvas_link_outbox (
 
 CREATE INDEX canvas_link_outbox_due_idx ON canvas_link_outbox (next_attempt_at, id);
 
+-- Every new Copper account (password signup, SSO sign-in, `admin create-user`, the admin
+-- portal, …) is queued for provisioning on Canvas Cloud while a link exists, in the inserting
+-- transaction, whichever code path or process inserted it. The outbox worker picks it up
+-- within seconds. Rollback drops this trigger and function before the tables.
+CREATE FUNCTION canvas_link_user_created() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO canvas_link_outbox (kind, subject)
+    SELECT 'upsert_user', NEW.id WHERE EXISTS (SELECT 1 FROM canvas_link WHERE id = 1);
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER canvas_link_user_created AFTER INSERT ON users
+    FOR EACH ROW EXECUTE FUNCTION canvas_link_user_created();
+
 -- Migration ledger of `copper-cloud canvas migrate` (idempotent re-runs, rollback evidence).
 --   status  'migrated' | 'failed'
 --   digest  canonical document digest reported by Canvas Cloud (CONTRACT §6.3)

@@ -171,6 +171,14 @@ impl MockState {
         id
     }
 
+    /// Send `event: resync` (as Canvas Cloud does when it cannot resume a stream).
+    pub fn publish_resync(&self) {
+        let id = self.event_seq.load(Ordering::SeqCst);
+        let _ = self
+            .events
+            .send((id, "resync".into(), r#"{"reason":"gap"}"#.into()));
+    }
+
     /// Number of connected event-stream clients.
     pub fn event_clients(&self) -> usize {
         self.events.receiver_count()
