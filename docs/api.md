@@ -674,7 +674,8 @@ data: {"skipped":12}
   Changes made with the server CLI send no event.
 - `resync`: this stream fell behind and dropped events (`{"skipped":n}`), or a linked Canvas
   Cloud's events may have been missed (`{"type":"resync","reason":"canvas"}`, 0.11.0, sent to
-  every connected user); do a full pull (`GET /v1/sync/docs` + history from your cursor) and
+  every connected user, then followed by `event: canvas` `{"type":"canvas","kind":"resync"}`
+  without a `canvas_id`); do a full pull (`GET /v1/sync/docs` + history from your cursor) and
   refetch canvases.
 - A `: keepalive` comment every 15 s. The stream ends on server shutdown, when the session is
   revoked (checked every 5 min), or on network loss — reconnect with backoff and re-pull.

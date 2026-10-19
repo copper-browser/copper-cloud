@@ -816,6 +816,10 @@ async fn event_bridge_feeds_sync_events() {
     for (stream, buf) in [(&mut stream, &mut buf), (&mut bob_stream, &mut bob_buf)] {
         let ev = next_event(stream, buf, "resync").await;
         assert_eq!(ev, json!({ "type": "resync", "reason": "canvas" }));
+        // …and a canvas event without a canvas, for clients that refresh their canvas list
+        // only on `canvas` (Copper for Mac).
+        let ev = next_event(stream, buf, "canvas").await;
+        assert_eq!(ev, json!({ "type": "canvas", "kind": "resync" }));
     }
 }
 

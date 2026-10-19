@@ -194,8 +194,10 @@ holds an SSE stream on `GET {url}/v1/apps/self/events` with the app key:
   when the link points at a new URL). When Canvas Cloud cannot resume from it (it restarted,
   or the bridge was away longer than its 4096-event buffer) it sends `event: resync`; the
   bridge then sends `event: resync` (`data: {"type":"resync","reason":"canvas"}`) to every
-  connected Copper user, who refetch as after a lagged stream, so no canvas change is missed
-  silently.
+  connected Copper user, who refetch as after a lagged stream, followed by
+  `event: canvas` (`data: {"type":"canvas","kind":"resync"}`, no `canvas_id`) for clients
+  that refresh their canvas list and invites only on `canvas` events (Copper for Mac), so no
+  canvas change is missed silently.
 - Reconnects with exponential backoff, 1 s → 30 s; treats 45 s without any bytes (Canvas
   Cloud sends a keep-alive every 15 s) as a dead stream; follows link changes within 5 s.
 
@@ -214,6 +216,7 @@ The `kind`s are Canvas Cloud's, unchanged from 0.8:
 | `update` | members | document changed (at most once per 2 s per canvas, plus one trailing) |
 | `mention` | each newly mentioned member | someone @mentioned you in the canvas chat |
 | `mention_read` | you | your mentions on that canvas were marked read |
+| `resync` (copper-cloud, 0.11.0; no `canvas_id`) | every connected user | the bridge could not resume Canvas Cloud's event stream: refetch canvases, invites and mentions |
 
 Only users of this app receive events through the bridge, which is every Copper user.
 

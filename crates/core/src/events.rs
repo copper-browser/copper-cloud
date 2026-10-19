@@ -56,6 +56,13 @@ pub enum Event {
     /// could not resume): refetch what you cache, as after a lagged stream. Sent to every
     /// connected user as `event: resync`.
     Resync { reason: String },
+    /// Canvases, invites or mentions may have changed while canvas events were lost (sent
+    /// right after `Resync` when a linked Canvas Cloud's event stream could not resume):
+    /// refetch them. SSE `event: canvas`, data `{"type":"canvas","kind":"resync"}` — no
+    /// `canvas_id` — so clients that refresh their canvas list only on `canvas` events
+    /// (Copper for Mac) catch up as well.
+    #[serde(rename = "canvas")]
+    CanvasResync { kind: &'static str },
 }
 
 impl Event {
@@ -65,7 +72,7 @@ impl Event {
             Self::Doc { .. } => "doc",
             Self::History { .. } => "history",
             Self::HistoryDeleted { .. } => "history_deleted",
-            Self::Canvas { .. } => "canvas",
+            Self::Canvas { .. } | Self::CanvasResync { .. } => "canvas",
             Self::Addons => "addons",
             Self::Resync { .. } => "resync",
         }
@@ -170,6 +177,16 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Event::Addons).unwrap(),
             r#"{"type":"addons"}"#
+        );
+    }
+
+    #[test]
+    fn canvas_resync_is_a_canvas_event_without_a_canvas() {
+        let ev = Event::CanvasResync { kind: "resync" };
+        assert_eq!(ev.name(), "canvas");
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"type":"canvas","kind":"resync"}"#
         );
     }
 

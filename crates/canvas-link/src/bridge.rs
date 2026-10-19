@@ -5,7 +5,9 @@
 //! `event: canvas` frames as before the split. A `resync` (Canvas Cloud could not resume from
 //! our `Last-Event-ID`, e.g. after it restarted, so canvas events may have been missed) is
 //! passed on to every connected Copper user as `event: resync`, which Copper clients answer by
-//! refetching; keep-alive comments only feed the idle watchdog.
+//! refetching, followed by `event: canvas` `{"type":"canvas","kind":"resync"}` (no
+//! `canvas_id`) for clients that refresh their canvas list only on `canvas` events (Copper for
+//! Mac); keep-alive comments only feed the idle watchdog.
 
 use std::time::Duration;
 
@@ -290,6 +292,11 @@ async fn session(
                     state.events.publish_all(&Event::Resync {
                         reason: "canvas".into(),
                     });
+                    // Copper for Mac refreshes its canvas list and invites on `canvas` events
+                    // only, not on `resync`.
+                    state
+                        .events
+                        .publish_all(&Event::CanvasResync { kind: "resync" });
                     link.update_bridge(|b| b.last_event_at = Some(OffsetDateTime::now_utc()));
                 }
                 _ => {}
