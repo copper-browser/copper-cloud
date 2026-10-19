@@ -130,7 +130,7 @@ pub async fn run(
     }
 
     // 2. Which canvases.
-    let (plan, unknown_only) = plan(legacy::canvases(db).await?, &ledger, &opts);
+    let (plan, unknown_only) = plan(legacy::canvases(db, &schema).await?, &ledger, &opts);
 
     // 3. Canvases, `concurrency` at a time, results in legacy order.
     let ctx = Ctx {
@@ -214,9 +214,14 @@ fn plan(
         if !only.is_empty() && !only.contains(&canvas.id) {
             continue;
         }
-        let migrated = ledger
-            .get(&canvas.id)
-            .filter(|e| e.status == "migrated" && !opts.replace && !only.contains(&canvas.id));
+        // A canvas that changed on the legacy tables since its import goes through the full
+        // path, which reports it (see `Ctx::exists`).
+        let migrated = ledger.get(&canvas.id).filter(|e| {
+            e.status == "migrated"
+                && !opts.replace
+                && !only.contains(&canvas.id)
+                && e.mark.as_ref().is_none_or(|m| *m == canvas.mark)
+        });
         plan.push(match migrated {
             Some(entry) => Plan::Skip(canvas, entry.digest.clone()),
             None => Plan::Go(canvas),
@@ -436,7 +441,7 @@ impl Ctx<'_> {
             );
             return self.fail_changed(canvas, row, msg, &digest).await;
         }
-        let detail = self.detail(row, if replaced { "replaced" } else { "created" });
+        let detail = self.detail(canvas, row, if replaced { "replaced" } else { "created" });
         ledger::record(
             self.db,
             canvas.id,
@@ -498,6 +503,16 @@ impl Ctx<'_> {
         stored: &str,
     ) -> anyhow::Result<()> {
         let entry = self.ledger.get(&canvas.id);
+        let legacy_changed = entry
+            .and_then(|e| e.mark.as_ref())
+            .is_some_and(|m| *m != canvas.mark);
+        if conflict == stored && entry.is_some_and(|e| e.vouches_for(stored)) && legacy_changed {
+            let msg = "changed in the legacy tables since it was migrated (edited in the old \
+                       copper-cloud after a rollback?) — use --only ID --replace to re-import \
+                       it, overwriting the Canvas Cloud copy"
+                .to_owned();
+            return self.fail(canvas, row, msg, None).await;
+        }
         if conflict == stored && entry.is_some_and(|e| e.vouches_for(stored)) {
             if entry.is_some_and(|e| e.status != "migrated") {
                 ledger::confirm(
@@ -526,8 +541,14 @@ impl Ctx<'_> {
         self.fail(canvas, row, msg, None).await
     }
 
-    fn detail(&self, row: &CanvasReport, import_status: &str) -> serde_json::Value {
+    fn detail(
+        &self,
+        canvas: &LegacyCanvas,
+        row: &CanvasReport,
+        import_status: &str,
+    ) -> serde_json::Value {
         json!({
+            "legacy_mark": canvas.mark,
             "name": row.name,
             "kind": row.kind,
             "owner": row.owner,
@@ -552,7 +573,7 @@ impl Ctx<'_> {
         msg: String,
         digest: Option<&str>,
     ) -> anyhow::Result<()> {
-        let mut detail = self.detail(row, "none");
+        let mut detail = self.detail(canvas, row, "none");
         detail["error"] = json!(msg);
         ledger::record(
             self.db,
@@ -577,7 +598,7 @@ impl Ctx<'_> {
         msg: String,
         digest: &str,
     ) -> anyhow::Result<()> {
-        let mut detail = self.detail(row, "unverified");
+        let mut detail = self.detail(canvas, row, "unverified");
         detail["error"] = json!(msg);
         ledger::record(
             self.db,

@@ -124,21 +124,43 @@ pub(crate) struct LegacyCanvas {
     pub owner_id: Uuid,
     /// Sealed bytes of snapshot + update tail (sizing the import timeout).
     pub stored_bytes: i64,
+    /// Fingerprint of the legacy rows (name, kind, snapshot seq, update count and last seq,
+    /// member / invite / link / mention counts). Kept in the ledger at import, so a re-run
+    /// notices a canvas that changed on the legacy tables since (an edit after a rollback).
+    pub mark: String,
 }
 
-pub(crate) async fn canvases(db: &PgPool) -> anyhow::Result<Vec<LegacyCanvas>> {
-    sqlx::query_as(
+pub(crate) async fn canvases(db: &PgPool, schema: &Schema) -> anyhow::Result<Vec<LegacyCanvas>> {
+    let links = if schema.links {
+        "(SELECT count(*) FROM canvas_share_links l WHERE l.canvas_id = c.id)"
+    } else {
+        "0"
+    };
+    let mentions = if schema.mentions {
+        "(SELECT count(*) FROM canvas_mentions n WHERE n.canvas_id = c.id)"
+    } else {
+        "0"
+    };
+    let sql = format!(
         r#"SELECT c.id, c.name, c.kind, c.owner_id,
                   (COALESCE((SELECT octet_length(s.state) FROM canvas_snapshots s
                               WHERE s.canvas_id = c.id), 0)
                    + COALESCE((SELECT sum(octet_length(u."update")) FROM canvas_updates u
-                                WHERE u.canvas_id = c.id), 0))::bigint AS stored_bytes
+                                WHERE u.canvas_id = c.id), 0))::bigint AS stored_bytes,
+                  md5(concat_ws('|', c.name, c.kind,
+                      (SELECT s.seq FROM canvas_snapshots s WHERE s.canvas_id = c.id),
+                      (SELECT count(*) || ':' || COALESCE(max(u.seq), 0) FROM canvas_updates u
+                        WHERE u.canvas_id = c.id),
+                      (SELECT count(*) FROM canvas_members m WHERE m.canvas_id = c.id),
+                      (SELECT count(*) FROM canvas_invites i WHERE i.canvas_id = c.id),
+                      {links}, {mentions})) AS mark
            FROM canvases c
-           ORDER BY c.created_at, c.id"#,
-    )
-    .fetch_all(db)
-    .await
-    .context("reading canvases")
+           ORDER BY c.created_at, c.id"#
+    );
+    sqlx::query_as(&sql)
+        .fetch_all(db)
+        .await
+        .context("reading canvases")
 }
 
 /// What one canvas stream has produced so far (shared with the caller, which reads it after

@@ -487,12 +487,37 @@ async fn replace_reimports_canvases_that_changed_in_copper() {
     let new = w.roadmap.truth();
     assert_ne!(old, new);
 
-    // A plain re-run trusts the ledger …
+    // A plain re-run notices the legacy change and says how to bring it over, changing
+    // nothing (and the other canvases stay `already`) …
     let plain = env.migrate(opts()).await.unwrap();
-    assert_eq!(row(&plain, w.roadmap.id).status, Status::Already);
+    assert!(!plain.ok(), "{plain}");
+    let r = row(&plain, w.roadmap.id);
+    assert_eq!(r.status, Status::Failed);
+    assert!(
+        r.error
+            .as_deref()
+            .unwrap()
+            .contains("changed in the legacy tables"),
+        "{r:?}"
+    );
+    assert_eq!(plain.totals.already, 3, "{plain}");
     assert_eq!(
         env.mock.stored_digest(w.roadmap.id).as_deref(),
         Some(old.as_str())
+    );
+    // … so does `--only` it without `--replace`, and the ledger keeps the migrated record.
+    let only = env
+        .migrate(MigrateOptions {
+            only: vec![w.roadmap.id],
+            ..opts()
+        })
+        .await
+        .unwrap();
+    assert_eq!(row(&only, w.roadmap.id).status, Status::Failed, "{only}");
+    let (status, digest, _) = env.ledger_row(w.roadmap.id).await.unwrap();
+    assert_eq!(
+        (status.as_str(), digest.as_deref()),
+        ("migrated", Some(old.as_str()))
     );
 
     // … --replace re-imports every canvas from the legacy data.

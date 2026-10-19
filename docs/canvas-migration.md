@@ -229,7 +229,7 @@ In the admin portal: **Canvas Cloud** shows the link reachable and live updates 
 
 | Command | What it does |
 |---|---|
-| `canvas migrate` | every legacy canvas not yet `migrated` in the ledger; ledger-`migrated` canvases are reported `already` without contacting Canvas Cloud |
+| `canvas migrate` | every legacy canvas not yet `migrated` in the ledger; ledger-`migrated` canvases are reported `already` without contacting Canvas Cloud, unless their legacy rows changed since the import (then failed, see [rollback](#rollback)) |
 | `canvas migrate --only ID [--only ID]…` | just those canvases, **even if** the ledger says migrated: a canvas that exists on Canvas Cloud with the digest the ledger recorded is reported `already` (and an `imported` row is confirmed as `migrated`); different content fails with "use --replace". An id that is not a legacy canvas is reported failed |
 | `canvas migrate --replace` | every legacy canvas, ledger ignored, imported with `mode=replace`: a canvas that already exists on Canvas Cloud is deleted and re-imported atomically from the legacy data (its room is closed first). Only canvases that an import by this app created can be replaced. **Edits made on Canvas Cloud since are lost** |
 | `canvas migrate --only ID --replace` | overwrite one canvas from the legacy data |
@@ -329,6 +329,7 @@ only.
 | `user …: missing from the users:batch response` / `<code>: <message>` | Canvas Cloud rejected that user (e.g. invalid email); fix the account in Copper or on Canvas Cloud |
 | `provisioning users: POST …/users:batch answered …` | Canvas Cloud refused the batch; see its logs |
 | `exists in canvas-cloud with different content (digest …; it changed since this ledger recorded it (edited in canvas-cloud?)) — use --replace …` | someone edited it on Canvas Cloud after the migration: leave it (the Canvas Cloud copy is newer) or `--only ID --replace` to restore the legacy content |
+| `changed in the legacy tables since it was migrated (edited in the old copper-cloud after a rollback?) — use --only ID --replace …` | the canvas was edited on the old release after its import (a rollback period): `--only ID --replace` brings the legacy content over, overwriting the Canvas Cloud copy |
 | `exists in canvas-cloud with different content (…; this ledger has no verified record of importing it) — use --replace …` | a canvas with that id exists on Canvas Cloud from another import (another copper-cloud database, an earlier attempt without a ledger): `--only ID --replace` after checking |
 | `canvas exists in canvas-cloud but no digest is available (use --replace)` | the digest endpoint failed for an existing canvas; retry, or `--only ID --replace` |
 | `409 personal_exists … — the owner already has a non-empty Personal canvas in canvas-cloud (use --replace)` | the owner used canvases on Canvas Cloud before the migration (e.g. copper-cloud ran linked): `--only ID --replace` overwrites their Canvas Cloud Personal canvas with the legacy one |
@@ -386,6 +387,8 @@ What happens to work done after the cutover:
 - Sync data, accounts and devices are unaffected (same tables in both releases).
 - Users deleted after the upgrade have lost their legacy canvases too (cascade).
 - Upgrading again after a rollback: the ledger still says `migrated` and Canvas Cloud still has
-  the earlier imports, so a plain `canvas migrate` reports them `already` even if they were
-  edited on the old release in between. Use `canvas migrate --replace` to bring the legacy
-  content over again (this overwrites what Canvas Cloud has).
+  the earlier imports. The ledger also keeps a fingerprint of each canvas's legacy rows at
+  import, so `canvas migrate` reports canvases unchanged since as `already` and every canvas
+  edited on the old release in between as **failed** ("changed in the legacy tables since it
+  was migrated"), changing nothing. Bring those over with `canvas migrate --only ID --replace`
+  (this overwrites what Canvas Cloud has for that canvas), or all at once with `--replace`.

@@ -24,6 +24,8 @@ use uuid::Uuid;
 pub(crate) struct Entry {
     pub status: String,
     pub digest: Option<String>,
+    /// [`crate::legacy::LegacyCanvas::mark`] when it was imported (`None` in older ledgers).
+    pub mark: Option<String>,
 }
 
 impl Entry {
@@ -35,14 +37,24 @@ impl Entry {
 }
 
 pub(crate) async fn load(db: &PgPool) -> anyhow::Result<HashMap<Uuid, Entry>> {
-    let rows: Vec<(Uuid, String, Option<String>)> =
-        sqlx::query_as("SELECT canvas_id, status, digest FROM canvas_migrations")
-            .fetch_all(db)
-            .await
-            .context("reading the canvas_migrations ledger")?;
+    let rows: Vec<(Uuid, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT canvas_id, status, digest, detail->>'legacy_mark' FROM canvas_migrations",
+    )
+    .fetch_all(db)
+    .await
+    .context("reading the canvas_migrations ledger")?;
     Ok(rows
         .into_iter()
-        .map(|(id, status, digest)| (id, Entry { status, digest }))
+        .map(|(id, status, digest, mark)| {
+            (
+                id,
+                Entry {
+                    status,
+                    digest,
+                    mark,
+                },
+            )
+        })
         .collect())
 }
 
