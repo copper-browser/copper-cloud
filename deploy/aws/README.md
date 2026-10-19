@@ -186,6 +186,38 @@ and existing accounts keep working. One thing still changes: without a domain, e
 generates a **new self-signed certificate**. That changes the link code's `fp=`, so linked
 Coppers have to paste the new link code (`./link-code.sh <name>`).
 
+## Canvas Cloud
+
+Since copper-cloud 0.9.0, canvases are served by a linked
+[Canvas Cloud](https://github.com/copper-browser/canvas-cloud) ([docs/canvas-link.md](../../docs/canvas-link.md)).
+This Terraform does **not** create one. A new deployment runs without it: canvas requests
+answer `503 canvas_unavailable` and `doctor` warns.
+
+- Don't install Canvas Cloud on this VM. The VM is replaced on every `--release`, `--domain`
+  or `--key-name` change, and its root volume goes with it. Run Canvas Cloud on a durable
+  host with its own database and backups, and link it from an SSM session:
+
+  ```bash
+  sudo copper-cloud canvas link --url https://canvas.example.com --key-file /root/canvas-app.key \
+      [--fingerprint <sha256 of a self-signed Canvas Cloud certificate>]
+  ```
+
+- The link lives in RDS (`canvas_link`, app key sealed under the master key). It survives
+  VM replacement, so you only link once.
+- The app SG only restricts inbound traffic. The VM must be able to reach the Canvas Cloud's
+  port outbound, and the Canvas Cloud must accept connections from the EIP.
+- **Upgrading a deployment that has canvases from 0.8.x** to 0.9.0:
+  1. Stop copper-cloud on the old VM (`sudo systemctl stop copper-cloud` in an SSM session)
+     so the snapshot holds every canvas edit, then take an RDS snapshot:
+     `aws rds create-db-snapshot --db-instance-identifier copper-cloud-<name> --db-snapshot-identifier copper-cloud-<name>-pre-0-9`.
+  2. Run `./up.sh <name> --release v0.9.0`. The new VM comes up with canvases unavailable.
+  3. In an SSM session, follow steps 2–7 of the runbook in
+     [docs/canvas-migration.md](../../docs/canvas-migration.md#runbook): stop copper-cloud,
+     then `canvas link`, `canvas migrate --dry-run`, `canvas migrate`, start, and verify.
+     Rollback: [docs/canvas-migration.md › Rollback](../../docs/canvas-migration.md#rollback)
+     on the VM, or `./up.sh <name> --release v0.8.1` after removing migration `0030` as
+     described there (or restore the snapshot).
+
 ## Costs (us-east-1, on-demand, approximate)
 
 | Item | $/month |

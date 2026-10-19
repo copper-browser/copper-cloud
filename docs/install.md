@@ -150,3 +150,18 @@ in the proxy. Link codes then carry an `fp` only if `tls.cert_path` points at th
 certificate; with a publicly trusted proxy certificate clients use normal validation. The proxy
 must pass `X-Copper-Instance`, allow long-lived responses (SSE: disable buffering) and
 WebSocket upgrades on `/v1/canvases/*/ws`.
+
+## Canvases (Canvas Cloud)
+
+Since 0.9.0 canvases are served by a linked [Canvas Cloud](https://github.com/copper-browser/canvas-cloud).
+A fresh install runs without one (canvas routes answer `503 canvas_unavailable`; `doctor`
+warns). Install Canvas Cloud — on the same host listening on `127.0.0.1` with TLS off is the
+small setup — create an app key with `canvas-cloud apps create --name "Copper Cloud"
+--allow-import`, then:
+
+```sh
+sudo copper-cloud canvas link --url http://127.0.0.1:8480 --key-file /root/canvas-app.key
+```
+
+Steps and Canvas Cloud settings: [canvas-link.md › Linking](canvas-link.md#linking) and
+[canvas-migration.md › Same-host Canvas Cloud](canvas-migration.md#0-same-host-canvas-cloud-if-not-installed-yet).

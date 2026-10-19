@@ -54,6 +54,11 @@ Always `{"error": "<code>", "message": "<text>"}`:
 | 413 | `payload_too_large` | body or payload over the configured limit |
 | 429 | `rate_limited` | auth rate limit, or a per-user limit (mentions, history delete) (header `Retry-After: 60`) |
 | 500 | `internal` | server bug / database failure (details only in server logs) |
+| 502 | `canvas_upstream` | canvas routes only: the linked Canvas Cloud is unreachable, timed out, or rejected the app key ([canvas-link.md](canvas-link.md#status-codes)) |
+| 503 | `canvas_unavailable` | canvas routes only: no Canvas Cloud is linked |
+
+Canvas routes otherwise return Canvas Cloud's status and body verbatim (except `401`, which
+is never forwarded).
 
 ### Rate limit
 
@@ -95,8 +100,9 @@ Key only (no session). Lets a client validate a link code before showing account
   "version": "0.8.1",
   "signup": true,
   "access_mode": "directory",
-  "features": ["history_delete"],
-  "limits": { "max_blob_bytes": 8000000, "max_history_batch": 2000, "max_history_entry_bytes": 16384 }
+  "features": ["history_delete", "canvas_link"],
+  "limits": { "max_blob_bytes": 8000000, "max_history_batch": 2000, "max_history_entry_bytes": 16384 },
+  "canvas": { "linked": true }
 }
 ```
 
@@ -111,6 +117,11 @@ only ever grows, and an absent field (older servers) means none of them:
 | Feature | Since | Means |
 |---|---|---|
 | `history_delete` | 0.8.0 | [`DELETE /v1/sync/history`](#delete-v1synchistory) and the `history_deleted` event |
+| `canvas_link` | 0.9.0 | canvases are served by a linked Canvas Cloud through this server ([canvas-link.md](canvas-link.md)); the canvas API itself is unchanged |
+
+`canvas` (0.9.0+): `linked` is `true` while a Canvas Cloud is linked and enabled. When it is
+`false`, every canvas route answers `503 canvas_unavailable`. It says nothing about
+reachability (that shows up as `502 canvas_upstream`).
 
 ---
 
@@ -511,8 +522,8 @@ data: {"skipped":12}
 - A `: keepalive` comment every 15 s. The stream ends on server shutdown, when the session is
   revoked (checked every 5 min), or on network loss — reconnect with backoff and re-pull.
 - Events carry no payloads; fetch the doc/history after an event. `canvas` kinds are listed in
-  [canvas.md](canvas.md#change-notifications) (0.6.0 adds `mention` and `mention_read`: refetch
-  `GET /v1/mentions`).
+  [canvas-link.md](canvas-link.md#event-bridge) (0.6.0 adds `mention` and `mention_read`: refetch
+  `GET /v1/mentions`). Since 0.9.0 they are bridged from the linked Canvas Cloud; frames are unchanged.
 
 ---
 
@@ -564,8 +575,14 @@ LiteLLM or Jev key. Same gate and session as every other `/v1` user endpoint (ga
 
 ## Canvases 🔒
 
-Mounted under the same `/v1` gate and session auth; documented in
-[canvas.md](canvas.md):
+Mounted under the same `/v1` gate and session auth. Since 0.9.0 they are served by the linked
+Canvas Cloud: copper-cloud forwards each request as the signed-in user and returns the answer
+unchanged ([canvas-link.md](canvas-link.md#the-proxy)); the routes are documented in Canvas
+Cloud's [docs/canvas.md](https://github.com/copper-browser/canvas-cloud/blob/main/docs/canvas.md)
+(pointers: [canvas.md](canvas.md)). Request bodies: 4 MiB for `/ops`, 64 KiB otherwise. No
+Canvas Cloud linked → `503 canvas_unavailable`; unreachable, timed out, or the app key was
+rejected → `502 canvas_upstream`; a Canvas Cloud `401` is never passed on (Copper would sign
+out). Routes:
 
 `GET/POST /v1/canvases`, `GET/PATCH/DELETE /v1/canvases/{id}`, `GET /v1/canvases/{id}/members`,
 `DELETE /v1/canvases/{id}/members/{user_id}`, `GET/POST /v1/canvases/{id}/invites`,
@@ -576,12 +593,15 @@ Mounted under the same `/v1` gate and session auth; documented in
 `GET /v1/people`, `GET /v1/canvases/{id}/ws`
 (WebSocket, Yjs sync protocol), `GET /v1/canvases/{id}/state`, `GET /v1/canvases/{id}/read`,
 `POST /v1/canvases/{id}/ops`, and chat mentions (0.6.0): `POST /v1/canvases/{id}/mentions`,
-`GET /v1/mentions`, `POST /v1/mentions/read` ([canvas.md](canvas.md#chat-and-mentions)).
+`GET /v1/mentions`, `POST /v1/mentions/read` ([Canvas Cloud › Chat and mentions](https://github.com/copper-browser/canvas-cloud/blob/main/docs/canvas.md#chat-and-mentions)).
 
 ### People
 
 `GET /v1/people` is available to any signed-in user on the instance. It returns active accounts
-(excluding the caller), sorted by display name:
+(excluding the caller), sorted by display name. Through the link these are the Canvas Cloud's
+enabled users: on a Canvas Cloud used only by this copper-cloud, the instance's Copper
+accounts; a Canvas Cloud with other accounts (its own sign-ups, other linked apps) lists those
+too:
 
 ```json
 {"people":[{"id":"uuid","display_name":"Ada","email":"ada@example.com"}]}
@@ -608,8 +628,11 @@ member; unknown or revoked tokens return `404 {"error":"link_not_found"}`. Joini
 a pending email invite, increments `uses`, and returns the normal canvas list item. Link tokens
 are 32 random bytes encoded base64url without padding and stored only as SHA-256 digests.
 
-`GET /join/{token}` is an ungated, no-store HTML handoff page for web links; it does not look up
-the token or reveal canvas data.
+`GET /join/{token}` is an ungated, no-store HTML handoff page for web links, served by
+copper-cloud itself (not proxied); it does not look up the token or reveal canvas data.
+
+The admin endpoints that manage the link (`GET/PUT/DELETE /admin/api/canvas-link`,
+`POST /admin/api/canvas-link/test`) are in [admin-api.md](admin-api.md#canvas-cloud-link).
 
 ---
 

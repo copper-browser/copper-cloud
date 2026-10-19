@@ -15,14 +15,20 @@ copper-cloud doctor (0.8.1)
   ok    tls         self-signed, fp=…, 3640 days left, names: 203.0.113.10, localhost, 127.0.0.1
   ok    listener    0.0.0.0:443 answering /healthz over HTTPS (HTTP/1.1 200 OK), fingerprint matches
   ok    metrics     http://127.0.0.1:9464/metrics
+  ok    canvas-link http://127.0.0.1:8480 (Canvas Cloud 0.1.0, 12 users, 36 canvases, 4 ms)
 doctor: all checks passed
 ```
 
 Exit status is non-zero if any check FAILs (warnings do not fail). Checks: config parses and
 validates (and is not group/world-readable), database reachable, no pending migrations,
 certificate present/parseable/not expiring within 30 days/matches its key (or ACME cache),
-the listener answers `/healthz` presenting the pinned certificate, metrics bind. Doctor never
-prints the link code or keys.
+the listener answers `/healthz` presenting the pinned certificate, metrics bind, and the
+linked Canvas Cloud answers with the app key (`canvas-link`: `warn` when none is linked,
+`FAIL` when it is unreachable or refuses the key — [canvas-link.md](canvas-link.md#status-and-doctor)).
+Doctor never prints the link code or keys.
+
+- `copper-cloud canvas status` — the Canvas Cloud link, a fresh reachability check and the
+  migration summary (exit 1 when linked but unreachable).
 
 - `copper-cloud healthcheck --wait 60` — exit 0 once `/healthz` answers (scripts, installers).
 - `GET /healthz` → `ok` (no key needed; suitable for load-balancer checks).
@@ -100,18 +106,36 @@ curl -s http://127.0.0.1:9464/metrics
 | `db_pool_size`, `db_pool_idle` | gauge | — (refreshed on scrape) |
 | `process_uptime_seconds` | gauge | — |
 
-Canvas metrics (rooms, peers, bytes) are documented in [canvas.md](canvas.md). To scrape
+| `canvas_link_ws_pipes` | gauge | — (proxied canvas WebSockets open now) |
+| `canvas_link_events_total` | counter | — (canvas events bridged from Canvas Cloud into `/v1/sync/events`) |
+
+Room, peer and document metrics are Canvas Cloud's (its own `/metrics`). To scrape
 remotely, bind to a private interface (`metrics_bind = "10.0.0.5:9464"`) and firewall it, or
 scrape through an SSH tunnel / node agent.
 
 Starter alerts: `rate(http_requests_total{status=~"5.."}[5m]) > 0`, p99 of
 `http_request_duration_seconds` > 1 s, `up == 0`, `db_pool_idle == 0` sustained.
 
+### Monitoring the canvas link
+
+- `copper-cloud doctor` (`canvas-link` line) or `copper-cloud canvas status` from cron /
+  a node agent: both exit non-zero when the linked Canvas Cloud is unreachable or refuses the
+  key.
+- `http_requests_total{status="502"}` on canvas routes (`/v1/canvases…`) = Canvas Cloud
+  unreachable or rejecting the app key; `status="503"` = no link. The log lines carry
+  `span.error` `canvas_upstream` / `canvas_unavailable`.
+- The portal's **Canvas Cloud** page (and `GET /admin/api/canvas-link` `bridge`) shows whether
+  the event bridge is connected; while it is not, canvas changes still work but Coppers are
+  not notified live.
+- Monitor the Canvas Cloud itself too (its `doctor`, `/healthz`, metrics).
+
 ## Backups
 
 What to back up:
 
-1. **The database** (`copper_cloud`): all users, sessions, sync docs, history, canvases.
+1. **The database** (`copper_cloud`): all users, sessions, sync docs, history, the canvas
+   link (app key sealed under the `master_key`), the migration ledger and — from before 0.9.0 —
+   the legacy canvas tables.
    ```sh
    sudo -u postgres pg_dump -Fc copper_cloud > copper_cloud-$(date +%F).dump
    # restore into an empty database:
@@ -123,6 +147,15 @@ What to back up:
    from the DB dumps (password manager / secrets store).
 3. **`/etc/copper-cloud/tls/`** (self-signed) — keeping the certificate keeps the pinned
    fingerprint valid. If lost, `tls-init` creates a new one and every Copper must re-link.
+4. **The Canvas Cloud** (since 0.9.0 the canvases live there): its database (`canvas_cloud`
+   by default) and `/etc/canvas-cloud/canvas-cloud.toml` with its `master_key` — see the
+   [Canvas Cloud README](https://github.com/copper-browser/canvas-cloud). Back both servers up
+   at the same time: canvas user ids are Copper user ids, so a copper-cloud restore that
+   brings back deleted users, or a Canvas Cloud restore older than recent sign-ups, is
+   reconciled by the link (users are re-pushed every 10 min). App users without a Copper
+   account are never deleted automatically — the reconcile loop only logs them — so an older
+   copper-cloud restore cannot wipe newer users' canvases; review, then delete them with
+   `copper-cloud canvas sync-users --prune` if that is what you want.
 
 A restore onto a new VM: install with the same `COPPER_CLOUD_INSTANCE_KEY` and
 `COPPER_CLOUD_MASTER_KEY` (or copy the config), copy `tls/`, restore the dump, `migrate`,
@@ -139,7 +172,26 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 
 The installer swaps the binary atomically, runs `migrate`, restarts and waits for health.
 Migrations are forward-only; take a DB backup first. Downgrading across a migration is not
-supported. Clients reconnect automatically (SSE and canvas WebSockets drop during restart).
+supported (for the 0.9.0 canvas move there is a documented rollback:
+[canvas-migration.md](canvas-migration.md#rollback)). Clients reconnect automatically (SSE and
+canvas WebSockets drop during restart).
+
+**Upgrading from 0.8.x to 0.9.0** moves canvases to a Canvas Cloud: follow the runbook in
+[canvas-migration.md](canvas-migration.md) instead of a plain upgrade. After a plain upgrade
+the server runs with canvases unavailable (`503`) until a Canvas Cloud is linked.
+
+### Canvas Cloud link
+
+```sh
+sudo copper-cloud canvas link --url http://127.0.0.1:8480 --key-file /root/canvas-app.key [--fingerprint HEX]
+sudo copper-cloud canvas status
+sudo copper-cloud canvas sync-users     # push every user now
+sudo copper-cloud canvas unlink         # canvases → 503 until linked again
+```
+
+Portal: **Canvas Cloud**. Rotating the app key: `canvas-cloud apps rotate <id>` on the
+Canvas Cloud, then `canvas link` again with the same URL and the new key (`linked_at` is kept).
+Details: [canvas-link.md](canvas-link.md).
 
 ## Administration
 
@@ -266,3 +318,7 @@ sudo copper-cloud admin create-access-key --label "Ada" [--email ada@example.com
 | service restarts in a loop | `journalctl -u copper-cloud -n 50`: DB unreachable, bad config, port in use |
 | ACME never gets a certificate | DNS must point at the VM and :443 must be reachable from the internet; look for `acme` log lines; `tls.acme_staging = true` while testing |
 | "pending migrations" in doctor | `sudo copper-cloud migrate` (serve also migrates at start) |
+| canvases fail with `503 canvas_unavailable` | no Canvas Cloud is linked: `sudo copper-cloud canvas status`, then `canvas link` ([canvas-link.md](canvas-link.md#linking)) |
+| canvases fail with `502 canvas_upstream` | `sudo copper-cloud doctor` / `canvas status`: Canvas Cloud down (`systemctl status canvas-cloud`), wrong URL, certificate changed (re-link with the new `--fingerprint`), or the app key was revoked/rotated (re-link with a new key); `journalctl -u copper-cloud -o cat \| jq -c 'select(.span.error=="canvas_upstream") \| .span.error_message'` |
+| canvas changes do not show up live on other Macs | the event bridge is disconnected: portal › Canvas Cloud › Live updates; `journalctl -u copper-cloud \| grep 'canvas event bridge'` |
+| a person's canvas list is empty after linking | they were provisioned against a Canvas Cloud without their canvases: run the migration ([canvas-migration.md](canvas-migration.md)) |
