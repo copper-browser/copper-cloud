@@ -1,6 +1,6 @@
 # Canvas link
 
-Since 0.9.0 copper-cloud does not store or serve canvases itself. Canvases live on a
+Since 0.11.0 copper-cloud does not store or serve canvases itself. Canvases live on a
 **Canvas Cloud** — a separate, self-hostable collaborative canvas server
 ([copper-browser/canvas-cloud](https://github.com/copper-browser/canvas-cloud), MIT) — and
 copper-cloud reaches it through a thin **canvas link** (crate `copper-cloud-canvas-link`,
@@ -9,7 +9,7 @@ reverse-proxies the unchanged canvas API there, acting as the signed-in Copper u
 re-publishes Canvas Cloud's canvas events on each user's `/v1/sync/events` stream.
 
 Copper (macOS and Linux) needs no update: the same routes, JSON, status codes,
-WebSocket protocol, close codes, SSE events and user ids as copper-cloud 0.8.
+WebSocket protocol, close codes, SSE events and user ids as copper-cloud 0.10.
 
 Moving an existing deployment's canvases over is a one-time step:
 [canvas-migration.md](canvas-migration.md).
@@ -47,7 +47,7 @@ Copper accounts and sessions, sync, intelligence keys, the admin portal, and the
   whose subject **and** user id are the Copper user id (see [Provisioning](#user-provisioning)).
 - Canvas content (Yjs documents, chat, mention excerpts) is stored and encrypted by Canvas
   Cloud, in Canvas Cloud's database. copper-cloud stores the link (one row), a provisioning
-  outbox, the migration ledger, and — untouched — the legacy canvas tables of 0.8.x.
+  outbox, the migration ledger, and — untouched — the legacy canvas tables of 0.10.x and older.
 
 The small recommended setup runs Canvas Cloud on the same host as copper-cloud, listening on
 loopback with TLS off (`listen = "127.0.0.1:8480"`, `tls.mode = "off"`), and links it as

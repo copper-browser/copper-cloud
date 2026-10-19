@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/copper-browser/copper-cloud"
@@ -94,7 +94,8 @@ clap = { version = "4", features = ["derive", "env"] }
 # portal (static export embedded at build time; debug builds read the folder at run time)
 rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess", "include-exclude"] }
 
-# canvas link (HTTP + WebSocket client to a linked Canvas Cloud; rustls `ring`, no aws-lc)
+# HTTP client: SSO provider calls (core), the canvas link (HTTP + WebSocket client to a
+# linked Canvas Cloud; rustls `ring`, no aws-lc) and the test suites
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 url = "2"

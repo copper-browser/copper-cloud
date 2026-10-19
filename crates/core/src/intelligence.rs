@@ -53,21 +53,21 @@ pub enum Actor {
 }
 
 impl Actor {
-    fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         match self {
             Self::Admin { email, .. } => email,
             Self::Cli => "cli",
         }
     }
 
-    fn admin_id(&self) -> Option<Uuid> {
+    pub(crate) fn admin_id(&self) -> Option<Uuid> {
         match self {
             Self::Admin { id, .. } => Some(*id),
             Self::Cli => None,
         }
     }
 
-    fn via(&self) -> &'static str {
+    pub(crate) fn via(&self) -> &'static str {
         match self {
             Self::Admin { .. } => "admin_api",
             Self::Cli => "cli",

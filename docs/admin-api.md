@@ -81,6 +81,10 @@ sorted **newest first**. Response envelope:
 
 `total` is the number of rows matching the filters (ignoring limit/offset).
 
+**Exception (0.9.0):** `GET integrations` and `GET integrations/{id}/devices` answer a plain
+JSON array, without the envelope or `limit`/`offset`. They are small lists, and the
+cross-client contract fixes their shape.
+
 ### Types
 
 * Timestamps: RFC 3339 UTC strings (`"2026-10-01T18:04:05.123Z"`), `null` when absent.
@@ -91,7 +95,7 @@ sorted **newest first**. Response envelope:
 
 Every mutation (login, logout, password, settings, AI keys, key create/revoke, user update /
 delete / reset-password, device delete, canvas delete, Canvas Cloud link set / remove / test,
-pairing-code revoke) writes an
+pairing-code revoke, SSO providers and settings, agent integrations) writes an
 `admin_audit` row, readable with `GET audit`. Users fetching the AI keys are recorded too
 (`intelligence.read`).
 
@@ -184,7 +188,8 @@ redirect — check the code). `new` shorter than 10 chars → `400`.
 {
   "access_mode": "directory",
   "allow_signup": true,
-  "instance_link_code": "copper-cloud://cloud.example.com:443/#k=<instance key>&fp=…"
+  "instance_link_code": "copper-cloud://cloud.example.com:443/#k=<instance key>&fp=…",
+  "instance_name": "Copper Cloud"
 }
 ```
 
@@ -197,16 +202,147 @@ redirect — check the code). `new` shorter than 10 chars → `400`.
 * `allow_signup`: self-service signup in `open` mode (the very first user can always sign up).
 * `instance_link_code`: the shared link code (works only in `open` mode). It is a secret —
   show it behind a "reveal" control. `null` if the TLS certificate is not readable.
+* `instance_name` (0.9.0): the name on the `/start` onboarding page ("Join <name> on Copper
+  Cloud"); default `"Copper Cloud"`.
 
 ### `PATCH /admin/api/settings`
 
 ```json
-// request (either field optional)
-{ "access_mode": "open", "allow_signup": false }
+// request (every field optional)
+{ "access_mode": "open", "allow_signup": false, "instance_name": "Example Inc" }
 // 200 → same shape as GET settings
 ```
 
 Invalid `access_mode` → `400`. The gate picks up a mode change within 5 seconds.
+`instance_name`: at most 100 characters; `""` resets it to the default.
+
+---
+
+## Single sign-on (0.9.0+; older servers answer `404`)
+
+Company sign-in for Coppers ([sso.md](sso.md)). The client secret is **write-only**: no
+response or audit row ever contains it (`has_secret` says whether one is stored).
+
+### `GET /admin/api/sso`
+
+```json
+{
+  "enabled": true,
+  "password_signin": true,
+  "providers": [{
+    "id": "google", "kind": "google", "name": "Google",
+    "client_id": "123-abc.apps.googleusercontent.com", "has_secret": true,
+    "issuer": null, "domains": ["example.com"], "auto_create": true, "enabled": true,
+    "updated_at": "2026-10-19T12:00:00Z"
+  }],
+  "join_link": "copper-cloud://cloud.example.com:443/#sso=google&fp=…",
+  "start_url": "https://cloud.example.com/start"
+}
+```
+
+* `enabled`: at least one provider is enabled and usable (Google needs its secret).
+* `providers`: every configured provider, enabled or not; `google` first.
+* `join_link` / `start_url`: for the first usable provider; both `null` while there is none.
+  The join link holds no secret (`fp` only on self-signed). With hybrid TLS both use
+  `tls.domain`, without `fp`.
+
+Every mutation below answers `200` with this same body.
+
+### `PUT /admin/api/sso/providers/{id}`
+
+```json
+{
+  "kind": "google",                 // or "oidc"
+  "name": "Google",                 // optional: default "Google" / the id
+  "client_id": "123-abc.apps.googleusercontent.com",
+  "client_secret": "GOCSPX-…",      // optional: omitted or "" keeps the stored one
+  "issuer": "https://example.okta.com",   // oidc only (https://), ignored for google
+  "domains": ["example.com"],       // 1-50 email domains; "@" and case are normalized
+  "auto_create": true,              // optional, default true
+  "enabled": true                   // optional, default true
+}
+```
+
+Creates or replaces the provider. `id`: 1-32 characters `a-z 0-9 - _`. `kind: "google"`
+must use id `google`, and only it. Google requires a client secret the first time; for OIDC
+it is optional (public client). `400 bad_request` on any invalid field. Audited as
+`sso.provider.put`.
+
+### `DELETE /admin/api/sso/providers/{id}`
+
+Removes the provider and its identity links; accounts stay and can sign in another way.
+Unknown → `404`. Audited as `sso.provider.delete`.
+
+### `POST /admin/api/sso/providers/{id}/test`
+
+```json
+{ "ok": true, "checks": [
+  { "name": "enabled", "ok": true, "detail": "enabled" },
+  { "name": "client_secret", "ok": true, "detail": "stored (encrypted)" },
+  { "name": "discovery", "ok": true, "detail": "token endpoint https://…" },
+  { "name": "token_endpoint", "ok": true, "detail": "client id and secret accepted (the test code was rejected as expected)" }
+] }
+```
+
+`discovery` appears for OIDC only. `token_endpoint` exchanges a dummy code: `invalid_grant`
+means the id and secret were accepted, `invalid_client` / `unauthorized_client` means they
+are wrong. Always `200` (`ok: false` with the failing check's `detail`); unknown provider →
+`404`.
+
+### `PATCH /admin/api/sso`
+
+```json
+{ "password_signin": false }
+```
+
+`false` refuses password signup/login for people (`403 password_signin_disabled`); admins are
+unaffected. Audited as `sso.password_signin`.
+
+---
+
+## Agent integrations (0.9.0+)
+
+Keys (`cai_…`) a trusted service uses with `POST /v1/agents/pair` to sign headless Coppers in
+to allowed-domain users ([sso.md](sso.md#agent-integrations)). A key is shown **once**
+(create, rotate); only its SHA-256 is stored.
+
+```json
+// Integration
+{
+  "id": "uuid", "name": "Bots", "domains": ["example.com"], "create_users": true,
+  "created_at": "…", "last_used_at": "…" | null, "revoked_at": null, "device_count": 3
+}
+```
+
+`domains: []` means the enabled SSO providers' domains.
+
+### `GET /admin/api/integrations`
+
+`[Integration, …]`, newest first. A plain array, not the pagination envelope.
+
+### `POST /admin/api/integrations`
+
+`{"name": "Bots", "domains": ["example.com"], "create_users": true}`: `domains` is optional
+(default `[]`) and `create_users` defaults to `true`. `201`:
+
+```json
+{ "integration": { …Integration }, "key": "cai_…" }
+```
+
+### `POST /admin/api/integrations/{id}/rotate`
+
+`200 {"key": "cai_…"}`. The old key stops working at once. Unknown → `404`; revoked → `400`.
+
+### `DELETE /admin/api/integrations/{id}`
+
+Revokes the integration (idempotent) and signs out every agent device it paired: their
+sessions are deleted and their gate keys revoked. `200` with the Integration (`revoked_at`
+set); unknown → `404`.
+
+### `GET /admin/api/integrations/{id}/devices`
+
+`[{"user_email", "device_id", "name", "last_seen_at"}]`, most recently seen first. Unknown
+integration → `404`.
 
 ---
 
@@ -631,9 +767,16 @@ object or `null`. Actions:
 | `intelligence.update` | `"intelligence"` | changed blocks as `{key_changed, key_last4, endpoint, model}` / `{key_changed, key_last4, url}` / `{max_turns}` for `agent` (or `null` when removed), `enabled`, and `via` (`"admin_api"` / `"cli"`) |
 | `intelligence.clear` | `"intelligence"` | `{via}` |
 | `intelligence.read` | user id | `{email, device_id, jev, router}` (booleans: which blocks were served) |
+| `sso.provider.put` | provider id | `{kind, name, client_id, issuer, domains, auto_create, enabled, secret_changed, via}` |
+| `sso.provider.delete` / `.enable` / `.disable` | provider id (`"*"` = all) | `{via}` (+ `providers` count) |
+| `sso.password_signin` | `"settings"` | `{password_signin, via}` |
+| `sso.user_create` / `sso.link` | user id | `{provider, email}`: an account created / linked by a first SSO sign-in (`admin_id: null`) |
+| `integration.create` / `.rotate` / `.revoke` | integration id | `{name, domains, create_users, via}` / `{name, via}` / `{name, revoked_sessions, revoked_gate_keys, via}` |
+| `agent.pair` | device id | `{integration_id, integration, user_id, email, device_name, created_user, revoked_sessions, revoked_gate_keys}` (`admin_id: null`) |
 
-`intelligence.*` rows written by the server CLI or by a user's read have `admin_id: null`
-(`detail.via = "cli"` for the CLI). Reads are recorded at most once per user per hour. No
+`intelligence.*`, `sso.*` and `integration.*` rows written by the server CLI, and rows written by
+a user's read, an SSO sign-in or an agent pairing, have `admin_id: null` (`detail.via = "cli"`
+for the CLI). Reads are recorded at most once per user per hour. No
 audit row ever contains key material.
 
 ---
@@ -659,6 +802,6 @@ audit row ever contains key material.
   do not load anything from other origins (fonts, CDNs) — bundle everything.
   Also sent: `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`.
 * Paths owned by the server and never served from the portal: `/v1/*`, `/admin/api/*`,
-  `/healthz`, `/metrics`.
+  `/healthz`, `/metrics`, `/start` (SSO onboarding page), `/join/*` (canvas links).
 * Dev: `next dev` proxies `/admin/api` to `https://127.0.0.1:8443`. With `tls.mode = "off"`
   locally the cookie has no `Secure` flag so plain-HTTP dev works.

@@ -55,6 +55,10 @@ pub struct TlsConfig {
     pub acme_cache_dir: PathBuf,
     /// Use the Let's Encrypt staging directory (testing).
     pub acme_staging: bool,
+    /// `acme` only: also serve the self-signed certificate (`cert_path` / `key_path`) to every
+    /// TLS client that does not ask for `domain` by SNI (raw IP, no SNI, other names), so
+    /// Coppers pinned to it before the domain was added keep working.
+    pub fallback_self_signed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -105,6 +109,20 @@ pub struct Config {
     pub log_format: LogFormat,
     /// `tracing` env-filter directive (overridden by `RUST_LOG` when set).
     pub log_level: String,
+    /// Test-only SSO endpoint overrides. Never read from the config file or the environment.
+    #[doc(hidden)]
+    pub sso_test: SsoTestHooks,
+}
+
+/// Lets integration tests point SSO at a local fake provider. Not configurable by operators:
+/// the defaults (real Google endpoints, HTTPS only) are the only production behaviour.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct SsoTestHooks {
+    /// Replaces Google's token endpoint (`https://oauth2.googleapis.com/token`).
+    pub google_token_endpoint: Option<String>,
+    /// Allow `http://` issuers and endpoints (a fake provider on 127.0.0.1).
+    pub allow_http: bool,
 }
 
 impl fmt::Debug for Config {
@@ -123,6 +141,7 @@ impl fmt::Debug for Config {
             .field("metrics_bind", &self.metrics_bind)
             .field("log_format", &self.log_format)
             .field("log_level", &self.log_level)
+            .field("sso_test", &self.sso_test)
             .finish()
     }
 }
@@ -179,6 +198,7 @@ struct RawTls {
     acme_email: Option<String>,
     acme_cache_dir: Option<PathBuf>,
     acme_staging: Option<bool>,
+    fallback_self_signed: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -217,6 +237,7 @@ const ENV_KEYS: &[(&str, Kind)] = &[
     ("tls.acme_email", Kind::Str),
     ("tls.acme_cache_dir", Kind::Str),
     ("tls.acme_staging", Kind::Bool),
+    ("tls.fallback_self_signed", Kind::Bool),
     ("limits.max_blob_bytes", Kind::Int),
     ("limits.max_history_batch", Kind::Int),
     ("limits.max_history_entry_bytes", Kind::Int),
@@ -378,6 +399,10 @@ impl Config {
         if tls_mode == TlsMode::Acme && domain.is_none() {
             bail!("`tls.mode = \"acme\"` requires `tls.domain`");
         }
+        let fallback_self_signed = raw.tls.fallback_self_signed.unwrap_or(false);
+        if fallback_self_signed && tls_mode != TlsMode::Acme {
+            bail!("`tls.fallback_self_signed` only applies to `tls.mode = \"acme\"`");
+        }
         let tls = TlsConfig {
             mode: tls_mode,
             cert_path: raw
@@ -395,6 +420,7 @@ impl Config {
                 .acme_cache_dir
                 .unwrap_or_else(|| PathBuf::from("/var/lib/copper-cloud/acme")),
             acme_staging: raw.tls.acme_staging.unwrap_or(false),
+            fallback_self_signed,
         };
 
         let public_url = match raw.public_url.filter(|s| !s.trim().is_empty()) {
@@ -465,6 +491,7 @@ impl Config {
                 .log_level
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "info".into()),
+            sso_test: SsoTestHooks::default(),
         })
     }
 
@@ -488,11 +515,13 @@ impl Config {
                 acme_email: None,
                 acme_cache_dir: PathBuf::from("acme"),
                 acme_staging: true,
+                fallback_self_signed: false,
             },
             limits: Limits::default(),
             metrics_bind: None,
             log_format: LogFormat::Pretty,
             log_level: "info".into(),
+            sso_test: SsoTestHooks::default(),
         }
     }
 

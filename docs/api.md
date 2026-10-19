@@ -5,7 +5,7 @@ RFC 3339 UTC strings. IDs are UUIDs (v7 for server-generated ones).
 
 ## Conventions
 
-### Gate credential (every `/v1` request except `POST /v1/auth/pair`)
+### Gate credential (every `/v1` request except `POST /v1/auth/pair`, the SSO routes and `POST /v1/agents/pair`)
 
 ```
 X-Copper-Instance: <instance key | access key>
@@ -45,8 +45,14 @@ Always `{"error": "<code>", "message": "<text>"}`:
 | Status | `error` | When |
 |---|---|---|
 | 400 | `bad_request` | invalid JSON, field, domain, too many history entries, … |
+| 400 | `bad_redirect` | SSO sign-in with a non-loopback `redirect_uri` |
 | 401 | `instance_key` / `session` / `credentials` / `account_disabled` / `pairing_code` | see above |
+| 401 | `sso_only` | password login for an account that only signs in with SSO |
+| 401 | `sso_failed` / `agent_key` | SSO code exchange or ID-token check failed; bad agent-integration key |
 | 403 | `forbidden` | signup disabled; writing another device's `tabs:` doc |
+| 403 | `password_signin_disabled` | password signup/login turned off by the admin (use SSO) |
+| 403 | `sso_domain` / `sso_no_account` / `agent_domain` / `account_disabled` | email domain not allowed; no account and auto-create off; disabled account (SSO, agent pairing) |
+| 404 | `sso_disabled` / `no_account` | SSO provider not set up / disabled; agent pairing for a missing account with `create_users` off |
 | 403 | `access_key_required` / `access_key_email` / `access_key_exhausted` | signup in `directory` mode without an access key; key bound to another email; key's `max_uses` reached |
 | 404 | `not_found` | unknown route / missing resource |
 | 404 | `link_not_found` | unknown, revoked, or deleted-canvas share link |
@@ -62,10 +68,11 @@ is never forwarded).
 
 ### Rate limit
 
-`/v1/auth/*` (except `GET /v1/auth/me` and `/v1/auth/pairing[/{id}]`, which need a session)
-is limited to `limits.auth_per_minute` (default 10) requests per minute per client IP (IPv6:
-per /64), GCRA (bursts of 10, then one every 6 s). This includes the ungated
-`POST /v1/auth/pair`. Admin login has its own bucket of the same size.
+`/v1/auth/*` (except `GET /v1/auth/me` and `/v1/auth/pairing[/{id}]`, which need a session,
+and the public `GET /v1/auth/sso`) is limited to `limits.auth_per_minute` (default 10) requests
+per minute per client IP (IPv6: per /64), GCRA (bursts of 10, then one every 6 s). This
+includes the ungated `POST /v1/auth/pair` and `POST /v1/auth/sso/{provider_id}`.
+`POST /v1/agents/pair` is not limited (its 256-bit key is the credential). Admin login has its own bucket of the same size.
 Behind a proxy set `trust_proxy = true` so the right-most `X-Forwarded-For` hop is used.
 `POST /v1/canvases/{id}/mentions` has its own per-user bucket (60 per minute, bursts of 60), and
 `DELETE /v1/sync/history` another (20 per minute, bursts of 20; requests rejected with `400` or
@@ -97,10 +104,10 @@ Key only (no session). Lets a client validate a link code before showing account
 ```json
 {
   "name": "copper-cloud",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "signup": true,
   "access_mode": "directory",
-  "features": ["history_delete", "canvas_link"],
+  "features": ["history_delete", "sso", "agent_pairing", "canvas_link"],
   "limits": { "max_blob_bytes": 8000000, "max_history_batch": 2000, "max_history_entry_bytes": 16384 },
   "canvas": { "linked": true }
 }
@@ -117,9 +124,11 @@ only ever grows, and an absent field (older servers) means none of them:
 | Feature | Since | Means |
 |---|---|---|
 | `history_delete` | 0.8.0 | [`DELETE /v1/sync/history`](#delete-v1synchistory) and the `history_deleted` event |
-| `canvas_link` | 0.9.0 | canvases are served by a linked Canvas Cloud through this server ([canvas-link.md](canvas-link.md)); the canvas API itself is unchanged |
+| `sso` | 0.9.0 | [`GET /v1/auth/sso`](#get-v1authsso--no-gate-header) and [`POST /v1/auth/sso/{provider_id}`](#post-v1authssoprovider_id--no-gate-header) |
+| `agent_pairing` | 0.9.0 | [`POST /v1/agents/pair`](#post-v1agentspair--no-gate-header) and device-bound pairing codes |
+| `canvas_link` | 0.11.0 | canvases are served by a linked Canvas Cloud through this server ([canvas-link.md](canvas-link.md)); the canvas API itself is unchanged |
 
-`canvas` (0.9.0+): `linked` is `true` while a Canvas Cloud is linked and enabled. When it is
+`canvas` (0.11.0+): `linked` is `true` while a Canvas Cloud is linked and enabled. When it is
 `false`, every canvas route answers `503 canvas_unavailable`. It says nothing about
 reachability (that shows up as `502 canvas_upstream`).
 
@@ -146,6 +155,8 @@ reachability (that shows up as `502 canvas_upstream`).
 - With the **instance key** (open mode): allowed when `allow_signup` is effective (config,
   overridden by `admin enable-signup` / `disable-signup` or the portal) **or** the instance
   has no users yet. Otherwise `403 {"error":"forbidden"}`.
+- `403 {"error":"password_signin_disabled"}` while the admin has turned password sign-in off
+  (single sign-on only).
 - With an **access key** (either mode): always allowed — the admin minted the key — but if
   the key carries an email, `email` must match it case-insensitively, else
   `403 {"error":"access_key_email"}`. Each signup counts one use of the key; when its
@@ -176,7 +187,9 @@ exists), `429`.
 
 `200` same shape as signup (a new session for that device; the device row is created or its
 name updated). Wrong email or password → `401 {"error":"credentials"}` (identical, constant
-work). Disabled account → `401 {"error":"account_disabled"}`. Any accepted gate credential
+work). Disabled account → `401 {"error":"account_disabled"}`. An account created by single
+sign-on has no password → `401 {"error":"sso_only"}` (the message says to use SSO). Password
+sign-in turned off by the admin → `403 {"error":"password_signin_disabled"}`. Any accepted gate credential
 works (access keys are not tied to an account for login).
 
 ### `POST /v1/auth/logout` 🔒
@@ -204,7 +217,8 @@ device can start pulling from 0, or from here to skip backfill.
 ```
 
 `200 {"ok": true, "revoked_sessions": 2}` — every *other* session is revoked. Wrong `old` →
-`401 {"error":"credentials"}`. Synced data is unaffected (data keys are wrapped by the server
+`401 {"error":"credentials"}` (also for an SSO-only account, which has no password). Synced
+data is unaffected (data keys are wrapped by the server
 master key, not the password).
 
 ---
@@ -270,6 +284,139 @@ The code is the credential, so this is the one `/v1` route reachable without
   visible and revocable in the portal).
 - Unknown, used, expired or revoked code → `401 {"error":"pairing_code"}`; the account is
   disabled → `401 {"error":"account_disabled"}` (the code is not consumed).
+- A code minted by [`POST /v1/agents/pair`](#post-v1agentspair--no-gate-header) is **bound to
+  a device**: redeeming it signs in that device id and name, whatever the request says (the
+  response's `device.id` is the one to keep).
+
+---
+
+## Single sign-on
+
+Company sign-in with Google or an OpenID Connect provider (0.9.0+, feature `sso`; older servers
+answer `404` → hide SSO). Native-app flow: authorization code + PKCE S256 with a loopback
+redirect (RFC 8252); the server holds the client secret and does the code exchange. Setup and
+the trust model: [sso.md](sso.md).
+
+### `GET /v1/auth/sso` — **no gate header**
+
+No credentials; not rate limited. Enabled, usable providers only:
+
+```json
+{
+  "enabled": true,
+  "password_signin": true,
+  "providers": [{
+    "id": "google", "kind": "google", "name": "Google",
+    "client_id": "123-abc.apps.googleusercontent.com",
+    "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+    "scopes": ["openid", "email", "profile"],
+    "domains": ["example.com"],
+    "hd": "example.com"
+  }]
+}
+```
+
+Off: `{"enabled": false, "password_signin": true, "providers": []}`. `kind` is `google` or
+`oidc` (the `authorization_endpoint` comes from the issuer's discovery document; an OIDC
+provider whose discovery fails is left out). `hd` is set only for Google with exactly one
+domain (pass it as the `hd` authorization parameter, with `prompt=select_account`).
+`password_signin: false` means password signup/login is off: show only SSO.
+
+### `POST /v1/auth/sso/{provider_id}` — **no gate header**
+
+Rate limited like `/v1/auth/*`.
+
+```json
+{
+  "code": "4/0Ab…",
+  "code_verifier": "43-128 chars (RFC 7636)",
+  "redirect_uri": "http://127.0.0.1:53682/",
+  "device": { "id": "uuid", "name": "Ada's MacBook" }
+}
+```
+
+- `redirect_uri` must be the loopback URI the authorization request used:
+  `http://127.0.0.1:<port>/…`, `http://[::1]:<port>/…` or `http://localhost:<port>/…` (no query
+  or fragment). Anything else → `400 bad_redirect`.
+- The server exchanges `code` + `code_verifier` (+ the client secret) at the provider's token
+  endpoint, then checks the ID token: `iss`, `aud`/`azp` = client id, `exp`,
+  `email_verified`, email domain ∈ `domains`; Google: `hd` ∈ `domains` too.
+- Account: the linked identity (provider, `sub`), else the account with that email (the
+  identity is linked to it), else a new password-less account when the provider's
+  `auto_create` is on (display name = `name` claim or the email's local part).
+- Then exactly what pairing does: device upsert, new session, gate key (`directory` mode: a
+  fresh access key labelled `"<device name> via sso"`; `open` mode: the instance key).
+
+`200`: the [`POST /v1/auth/pair`](#post-v1authpair--no-gate-header) response plus `created`
+(a new account was made):
+
+```json
+{
+  "token": "…", "user": { "id", "email", "display_name", "created_at" },
+  "device": { "id", "name", "created_at", "last_seen_at" },
+  "gate_key": "ck_… | <instance key>", "created": true
+}
+```
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `bad_redirect` | not a loopback redirect URI |
+| 400 | `bad_request` | missing `code`, `code_verifier` not 43-128 unreserved characters |
+| 401 | `sso_failed` | the provider rejected the code (`invalid_grant`, `invalid_client` in the message), unreachable provider, bad/expired ID token, unverified email |
+| 403 | `sso_domain` | email (or Google `hd`) not in the allowed domains; the message names them ("use your @example.com account") |
+| 403 | `sso_no_account` | no account with that email and `auto_create` is off |
+| 403 | `account_disabled` | the account is disabled |
+| 404 | `sso_disabled` | unknown or disabled provider (or Google without a client secret) |
+
+---
+
+## Agent pairing
+
+### `POST /v1/agents/pair` — **no gate header**
+
+For a trusted service holding an agent-integration key (minted by an admin, see
+[sso.md](sso.md#agent-integrations)) to sign a headless Copper in to a user's account.
+
+```
+Authorization: Bearer cai_<43 chars>
+```
+
+```json
+{
+  "email": "ada@example.com",
+  "device": { "id": "<stable uuid>", "name": "Bot · Vera" },
+  "display_name": "Ada Lovelace"
+}
+```
+
+- The integration must not be revoked; `email`'s domain must be in its `domains` (empty = the
+  enabled SSO providers' domains; neither → nobody).
+- User by email (case-insensitive); missing → created without a password when the integration
+  has `create_users` (display name = `display_name` or the email's local part), else
+  `404 no_account`.
+- `device.id` is required. The device is upserted and flagged as an agent device of the
+  integration. Re-pairing the same device id deletes its previous sessions, revokes the gate
+  keys minted for it and drops its unused codes.
+- Mints a single-use 10-minute pairing code **bound to that device id and name**. Redeem it
+  with [`POST /v1/auth/pair`](#post-v1authpair--no-gate-header).
+
+`200`:
+
+```json
+{
+  "code": "cp_…",
+  "link": "copper-cloud://cloud.example.com:443/#p=cp_…&fp=9f86…",
+  "expires_at": "2026-10-01T12:10:00Z",
+  "user": { "id": "uuid", "email": "ada@example.com", "display_name": "Ada Lovelace" },
+  "device": { "id": "uuid", "name": "Bot · Vera" },
+  "created_user": false
+}
+```
+
+Errors: `401 agent_key` (missing, malformed, unknown, rotated or revoked key), `403
+agent_domain` (the message names the allowed domains), `404 no_account`, `403
+account_disabled`, `400 bad_request` (email, missing `device.id`). Every pairing is audited
+(`agent.pair`).
 
 ---
 
@@ -523,7 +670,7 @@ data: {"skipped":12}
   revoked (checked every 5 min), or on network loss — reconnect with backoff and re-pull.
 - Events carry no payloads; fetch the doc/history after an event. `canvas` kinds are listed in
   [canvas-link.md](canvas-link.md#event-bridge) (0.6.0 adds `mention` and `mention_read`: refetch
-  `GET /v1/mentions`). Since 0.9.0 they are bridged from the linked Canvas Cloud; frames are unchanged.
+  `GET /v1/mentions`). Since 0.11.0 they are bridged from the linked Canvas Cloud; frames are unchanged.
 
 ---
 
@@ -575,7 +722,7 @@ LiteLLM or Jev key. Same gate and session as every other `/v1` user endpoint (ga
 
 ## Canvases 🔒
 
-Mounted under the same `/v1` gate and session auth. Since 0.9.0 they are served by the linked
+Mounted under the same `/v1` gate and session auth. Since 0.11.0 they are served by the linked
 Canvas Cloud: copper-cloud forwards each request as the signed-in user and returns the answer
 unchanged ([canvas-link.md](canvas-link.md#the-proxy)); the routes are documented in Canvas
 Cloud's [docs/canvas.md](https://github.com/copper-browser/canvas-cloud/blob/main/docs/canvas.md)

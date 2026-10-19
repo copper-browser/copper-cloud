@@ -3,6 +3,7 @@
 import {
   ActivityIcon,
   ArrowUpRightIcon,
+  BotIcon,
   CircleAlertIcon,
   FrameIcon,
   KeyRoundIcon,
@@ -13,6 +14,7 @@ import {
   PlusIcon,
   RectangleEllipsisIcon,
   SettingsIcon,
+  ShieldCheckIcon,
   SparklesIcon,
   UserIcon,
   UserMinusIcon,
@@ -47,6 +49,8 @@ const AUDIT_ICONS: Record<AuditIcon, LucideIcon> = {
   canvas: FrameIcon,
   pairing: LinkIcon,
   ai: SparklesIcon,
+  sso: ShieldCheckIcon,
+  agent: BotIcon,
   other: ActivityIcon,
 };
 

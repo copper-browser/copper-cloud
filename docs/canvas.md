@@ -1,6 +1,6 @@
 # Canvases
 
-Since 0.9.0 canvases are served by a linked **Canvas Cloud**
+Since 0.11.0 canvases are served by a linked **Canvas Cloud**
 ([copper-browser/canvas-cloud](https://github.com/copper-browser/canvas-cloud)), not by
 copper-cloud. The canvas API moved there verbatim and is documented in Canvas Cloud's
 [docs/canvas.md](https://github.com/copper-browser/canvas-cloud/blob/main/docs/canvas.md).
@@ -69,7 +69,7 @@ Moved to [Canvas Cloud › REST](https://github.com/copper-browser/canvas-cloud/
 ### Canvas share links
 
 Moved: [Canvas Cloud › Canvas share links](https://github.com/copper-browser/canvas-cloud/blob/main/docs/canvas.md#canvas-share-links).
-Tokens of links created on 0.8.x keep working after [migration](canvas-migration.md#what-is-preserved).
+Tokens of links created before 0.11.0 keep working after [migration](canvas-migration.md#what-is-preserved).
 
 ### `GET /canvases/{id}/state[?sv=<base64>]`
 

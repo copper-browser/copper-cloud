@@ -21,8 +21,9 @@ use crate::state::SharedState;
 /// Header every gated `/v1` request must carry.
 pub const INSTANCE_HEADER: &str = "x-copper-instance";
 
-/// The one `/v1` route reachable without the gate header: the pairing code is the
-/// credential (rate limited by the auth limiter).
+/// A `/v1` route reachable without the gate header: the pairing code is the credential
+/// (rate limited by the auth limiter). The SSO routes ([`crate::sso::is_sso_path`]) and
+/// [`crate::agents::AGENT_PAIR_PATH`] are ungated too.
 pub const PAIR_PATH: &str = "/v1/auth/pair";
 
 /// The admin login route (rate limited with its own per-IP bucket).
@@ -33,7 +34,11 @@ pub const ADMIN_LOGIN_PATH: &str = "/admin/api/login";
 pub const FEATURES: &[&str] = &[
     // `DELETE /v1/sync/history` (0.8.0).
     "history_delete",
-    // Canvases are served by a linked Canvas Cloud (0.9.0; see `canvas` in `/v1/info`).
+    // `GET /v1/auth/sso` + `POST /v1/auth/sso/{provider_id}` (0.9.0).
+    "sso",
+    // `POST /v1/agents/pair` + device-bound pairing codes (0.9.0).
+    "agent_pairing",
+    // Canvases are served by a linked Canvas Cloud (0.11.0; see `canvas` in `/v1/info`).
     "canvas_link",
 ];
 
@@ -43,6 +48,8 @@ pub fn router() -> Router<SharedState> {
         .route("/info", get(info))
         .merge(crate::auth::routes())
         .merge(crate::pairing::routes())
+        .merge(crate::sso::routes())
+        .merge(crate::agents::routes())
         .merge(crate::sync::routes())
         .merge(crate::intelligence::routes())
 }
@@ -112,10 +119,14 @@ async fn info(
     })))
 }
 
-/// Whether `path` is behind the instance gate: everything under `/v1` except
-/// [`PAIR_PATH`]. `/healthz`, `/admin/api/*` (own cookie auth) and the portal are not.
+/// Whether `path` is behind the instance gate: everything under `/v1` except [`PAIR_PATH`],
+/// the SSO routes and [`crate::agents::AGENT_PAIR_PATH`] (each carries its own credential or
+/// none at all). `/healthz`, `/admin/api/*` (own cookie auth) and the portal are not.
 pub fn is_gated(path: &str) -> bool {
-    (path == "/v1" || path.starts_with("/v1/")) && path != PAIR_PATH
+    (path == "/v1" || path.starts_with("/v1/"))
+        && path != PAIR_PATH
+        && path != crate::agents::AGENT_PAIR_PATH
+        && !crate::sso::is_sso_path(path)
 }
 
 /// Middleware: every gated path (see [`is_gated`]) must present a valid credential in
@@ -239,8 +250,11 @@ async fn auth_rate_limit(
     // `GET /v1/auth/me` and pairing-code management (`/v1/auth/pairing[/{id}]`) are
     // bearer-authenticated (no credential oracle: tokens are 256-bit; minting is capped per
     // user) and clients call them for status; everything else under /v1/auth counts —
-    // including the ungated `POST /v1/auth/pair`, whose code is the credential.
-    let exempt = (path == "/v1/auth/me" && req.method() == axum::http::Method::GET)
+    // including the ungated `POST /v1/auth/pair`, whose code is the credential, and the
+    // ungated SSO sign-in (`POST /v1/auth/sso/{provider_id}`). The public provider list
+    // (`GET /v1/auth/sso`) is a status read like `/me`.
+    let get = req.method() == axum::http::Method::GET;
+    let exempt = (get && (path == "/v1/auth/me" || path == crate::sso::SSO_PATH))
         || path == "/v1/auth/pairing"
         || path.starts_with("/v1/auth/pairing/");
     let limiter = if path == ADMIN_LOGIN_PATH {
@@ -281,6 +295,8 @@ mod tests {
             "/v1/info",
             "/v1/auth/login",
             "/v1/auth/pairing",
+            "/v1/auth/sso/google/x",
+            "/v1/agents",
             "/v1/x",
         ] {
             assert!(is_gated(p), "{p}");
@@ -288,6 +304,9 @@ mod tests {
         for p in [
             "/healthz",
             "/v1/auth/pair",
+            "/v1/auth/sso",
+            "/v1/auth/sso/google",
+            "/v1/agents/pair",
             "/admin/api/login",
             "/",
             "/keys",

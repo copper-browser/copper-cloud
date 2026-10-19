@@ -2,12 +2,14 @@
 
 import { CloudIcon } from "lucide-react"; // Canvas Cloud nav item
 import {
+  BotIcon,
   FrameIcon,
   KeyRoundIcon,
   LaptopIcon,
   LayoutGridIcon,
   LogOutIcon,
   SettingsIcon,
+  ShieldCheckIcon,
   SparklesIcon,
   UsersIcon,
 } from "lucide-react";
@@ -30,6 +32,8 @@ const NAV = [
   { href: "/keys/", label: "Access keys", icon: KeyRoundIcon },
   { href: "/people/", label: "People", icon: UsersIcon },
   { href: "/devices/", label: "Devices", icon: LaptopIcon },
+  { href: "/sso/", label: "Single sign-on", icon: ShieldCheckIcon },
+  { href: "/integrations/", label: "Agent access", icon: BotIcon },
   { href: "/canvases/", label: "Canvases", icon: FrameIcon },
   { href: "/canvas-cloud/", label: "Canvas Cloud", icon: CloudIcon },
   { href: "/intelligence/", label: "AI keys", icon: SparklesIcon },

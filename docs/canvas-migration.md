@@ -1,12 +1,12 @@
 # Migrating canvases to Canvas Cloud
 
-copper-cloud ≤ 0.8.x stored canvases in its own database (the `canvases`, `canvas_members`,
+copper-cloud ≤ 0.10.x stored canvases in its own database (the `canvases`, `canvas_members`,
 `canvas_invites`, `canvas_updates`, `canvas_snapshots`, `canvas_share_links` and
-`canvas_mentions` tables, migrations `0100`–`0103`). From 0.9.0 canvases are served by a linked
+`canvas_mentions` tables, migrations `0100`–`0103`). From 0.11.0 canvases are served by a linked
 [Canvas Cloud](https://github.com/copper-browser/canvas-cloud) ([canvas-link.md](canvas-link.md)).
 This page is the one-time move of an existing deployment's canvases, and the runbook for it.
 
-A fresh 0.9.0 install has empty legacy tables: link a Canvas Cloud and skip the migration.
+A fresh 0.11.0 install has empty legacy tables: link a Canvas Cloud and skip the migration.
 
 ## In short
 
@@ -69,7 +69,7 @@ What is **not** preserved:
    migration finished. Sync, history and sign-in are unavailable for that time; Coppers keep
    working offline and catch up. For scale: the Exowatt dev1 instance had 36 canvases,
    64 memberships, 889 updates (≈ 88 MB stored), 22 invites, 5 share links and 5 mentions.
-5. The release tarball or installer for copper-cloud 0.9.0.
+5. The release tarball or installer for copper-cloud 0.11.0.
 
 ## Runbook
 
@@ -123,9 +123,9 @@ sudo -u postgres psql -w -d copper_cloud -Atc 'SELECT count(*) FROM canvases'   
 ### 2. Install the new release
 
 ```sh
-tar xzf copper-cloud-0.9.0-linux-$(uname -m).tar.gz && sudo ./install.sh
+tar xzf copper-cloud-0.11.0-linux-$(uname -m).tar.gz && sudo ./install.sh
 # or: curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/install.sh \
-#       | sudo COPPER_CLOUD_VERSION=0.9.0 sh
+#       | sudo COPPER_CLOUD_VERSION=0.11.0 sh
 ```
 
 The installer applies the database migrations (adds `canvas_link`, `canvas_link_outbox`,
@@ -347,7 +347,7 @@ only.
 
 - The legacy tables stay as they were, read by nobody but `canvas migrate`. They are the
   rollback copy; keep them (and the pre-upgrade backup) until you no longer need to roll back.
-  They are not exposed through any route and are not changed by 0.9.0, except that deleting a
+  They are not exposed through any route and are not changed by 0.11.0, except that deleting a
   Copper user still removes their legacy rows (foreign-key cascade) and, through the admin
   API, legacy invites addressed to their email.
 - **Backups now include the Canvas Cloud database** (and its config with its `master_key`):
@@ -360,11 +360,11 @@ the moment of the migration.
 
 ```sh
 sudo systemctl stop copper-cloud
-# 0.8.x refuses to start with a migration it does not know (sqlx: "migration 30 was previously
+# Older releases refuse to start with a migration it does not know (sqlx: "migration 30 was previously
 # applied but is missing"): remove 0030's link tables and its record; keep the ledger.
 sudo -u postgres psql -w -d copper_cloud -v ON_ERROR_STOP=1 -c \
   "BEGIN; DROP TABLE canvas_link_outbox; DROP TABLE canvas_link; DELETE FROM _sqlx_migrations WHERE version = 30; COMMIT;"
-tar xzf copper-cloud-0.8.1-linux-$(uname -m).tar.gz && sudo ./install.sh   # reinstall the previous release
+tar xzf copper-cloud-0.10.0-linux-$(uname -m).tar.gz && sudo ./install.sh   # reinstall the previous release
 ```
 
 (Or restore the pre-upgrade dump / RDS snapshot — that also discards every sync and account

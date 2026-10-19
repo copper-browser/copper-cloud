@@ -15,18 +15,18 @@ use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderValue, Method};
 use axum::middleware::{from_fn, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Extension, Json, Router};
 use copper_cloud_canvas_link::admin::{self as link_admin, Actor, LinkError};
 use copper_cloud_canvas_link::{provision, CanvasLink};
 use copper_cloud_core::access::{self, AccessMode, NewAccessKey};
-use copper_cloud_core::auth;
 use copper_cloud_core::config::TlsMode;
 use copper_cloud_core::error::{is_unique_violation, ApiError, ApiResult};
 use copper_cloud_core::extract::{JsonBody, QueryParams};
 use copper_cloud_core::ids;
 use copper_cloud_core::intelligence;
 use copper_cloud_core::state::{AppState, SharedState};
+use copper_cloud_core::{agents, auth, sso};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use time::OffsetDateTime;
@@ -77,6 +77,19 @@ pub fn router() -> Router<SharedState> {
                 .put(put_intelligence)
                 .delete(delete_intelligence),
         )
+        .route("/sso", get(get_sso).patch(patch_sso))
+        .route(
+            "/sso/providers/{id}",
+            put(put_provider).delete(delete_provider),
+        )
+        .route("/sso/providers/{id}/test", post(test_provider))
+        .route(
+            "/integrations",
+            get(list_integrations).post(create_integration),
+        )
+        .route("/integrations/{id}", delete(revoke_integration))
+        .route("/integrations/{id}/rotate", post(rotate_integration))
+        .route("/integrations/{id}/devices", get(integration_devices))
         .fallback(copper_cloud_core::app::not_found)
         .layer(from_fn(guard))
 }
@@ -545,6 +558,7 @@ async fn settings_view(state: &AppState) -> ApiResult<Value> {
         "access_mode": mode,
         "allow_signup": allow_signup_setting(state).await?,
         "instance_link_code": link,
+        "instance_name": sso::instance_name(&state.db).await?,
     }))
 }
 
@@ -559,6 +573,8 @@ async fn get_settings(
 struct SettingsPatch {
     access_mode: Option<String>,
     allow_signup: Option<bool>,
+    /// Shown on `/start`; empty resets to "Copper Cloud".
+    instance_name: Option<String>,
 }
 
 async fn patch_settings(
@@ -590,6 +606,10 @@ async fn patch_settings(
         .execute(&mut *tx)
         .await?;
         changed.insert("allow_signup".into(), Value::Bool(on));
+    }
+    if let Some(name) = &req.instance_name {
+        let stored = sso::set_instance_name(&mut *tx, Some(name)).await?;
+        changed.insert("instance_name".into(), Value::from(stored));
     }
     if !changed.is_empty() {
         audit(
@@ -778,7 +798,7 @@ async fn create_key(
             expires_in_days: req.expires_in_days,
             max_uses: req.max_uses,
             created_by_admin: Some(s.admin_id),
-            created_by_user: None,
+            ..NewAccessKey::default()
         },
     )
     .await?;
@@ -1369,6 +1389,162 @@ async fn revoke_pairing_code(
     .await?;
     tx.commit().await?;
     Ok(ok())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Single sign-on (the client secret is write-only)
+
+/// `GET /admin/api/sso` (also the answer to every SSO mutation).
+async fn sso_view(state: &AppState) -> ApiResult<Value> {
+    let providers = sso::list_providers(&state.db).await?;
+    let primary = providers.iter().find(|p| p.usable());
+    Ok(json!({
+        "enabled": primary.is_some(),
+        "password_signin": sso::password_signin(&state.db).await?,
+        "providers": providers.iter().map(sso::Provider::admin_view).collect::<Vec<_>>(),
+        "join_link": primary.map(|p| sso::join_link(&state.cfg, &p.id)),
+        "start_url": primary.map(|_| sso::start_url(&state.cfg)),
+    }))
+}
+
+async fn get_sso(State(state): State<SharedState>, _s: AdminSession) -> ApiResult<Json<Value>> {
+    Ok(Json(sso_view(&state).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SsoPatch {
+    password_signin: Option<bool>,
+}
+
+async fn patch_sso(
+    State(state): State<SharedState>,
+    s: AdminSession,
+    JsonBody(req): JsonBody<SsoPatch, BODY_LIMIT>,
+) -> ApiResult<Json<Value>> {
+    if let Some(on) = req.password_signin {
+        sso::set_password_signin(&state.db, &intelligence_actor(&s), on).await?;
+    }
+    Ok(Json(sso_view(&state).await?))
+}
+
+async fn put_provider(
+    State(state): State<SharedState>,
+    s: AdminSession,
+    Path(id): Path<String>,
+    JsonBody(req): JsonBody<sso::ProviderInput, BODY_LIMIT>,
+) -> ApiResult<Json<Value>> {
+    sso::put_provider(
+        &state.db,
+        &state.cfg,
+        &state.crypto,
+        &intelligence_actor(&s),
+        &id,
+        req,
+    )
+    .await?;
+    state.sso.clear();
+    Ok(Json(sso_view(&state).await?))
+}
+
+async fn delete_provider(
+    State(state): State<SharedState>,
+    s: AdminSession,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    if !sso::delete_provider(&state.db, &intelligence_actor(&s), &id).await? {
+        return Err(ApiError::NotFound);
+    }
+    state.sso.clear();
+    Ok(Json(sso_view(&state).await?))
+}
+
+async fn test_provider(
+    State(state): State<SharedState>,
+    _s: AdminSession,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        sso::test_provider(&state, &id)
+            .await?
+            .ok_or(ApiError::NotFound)?,
+    ))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Agent integrations (keys shown once)
+
+async fn list_integrations(
+    State(state): State<SharedState>,
+    _s: AdminSession,
+) -> ApiResult<Json<Vec<agents::IntegrationView>>> {
+    Ok(Json(agents::list_integrations(&state.db).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateIntegrationRequest {
+    name: String,
+    #[serde(default)]
+    domains: Vec<String>,
+    #[serde(default = "default_true")]
+    create_users: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+async fn create_integration(
+    State(state): State<SharedState>,
+    s: AdminSession,
+    JsonBody(req): JsonBody<CreateIntegrationRequest, BODY_LIMIT>,
+) -> ApiResult<Response> {
+    let (integration, key) = agents::create_integration(
+        &state.db,
+        &intelligence_actor(&s),
+        &req.name,
+        &req.domains,
+        req.create_users,
+    )
+    .await?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(json!({ "integration": integration, "key": key })),
+    )
+        .into_response())
+}
+
+async fn rotate_integration(
+    State(state): State<SharedState>,
+    s: AdminSession,
+    Path(raw): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let key =
+        agents::rotate_integration(&state.db, &intelligence_actor(&s), parse_id(&raw)?).await?;
+    Ok(Json(json!({ "key": key })))
+}
+
+async fn revoke_integration(
+    State(state): State<SharedState>,
+    s: AdminSession,
+    Path(raw): Path<String>,
+) -> ApiResult<Json<agents::IntegrationView>> {
+    Ok(Json(
+        agents::revoke_integration(&state.db, &intelligence_actor(&s), parse_id(&raw)?).await?,
+    ))
+}
+
+async fn integration_devices(
+    State(state): State<SharedState>,
+    _s: AdminSession,
+    Path(raw): Path<String>,
+) -> ApiResult<Json<Vec<agents::AgentDeviceView>>> {
+    Ok(Json(
+        agents::integration_devices(&state.db, parse_id(&raw)?)
+            .await?
+            .ok_or(ApiError::NotFound)?,
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -335,3 +335,108 @@ export interface AuditEntry {
   detail: Record<string, unknown> | null;
   at: string;
 }
+
+// Single sign-on (copper-cloud ≥ 0.9.0; older servers answer 404) ----------
+
+export type SsoProviderKind = "google" | "oidc";
+
+export interface SsoProvider {
+  /** Slug used in URLs and link codes: `"google"`, `"oidc"`. */
+  id: string;
+  /** Kept open so a newer server's kinds still render. */
+  kind: SsoProviderKind | (string & {});
+  /** Button label in Copper: "Continue with <name>". */
+  name: string;
+  client_id: string;
+  /** The secret itself is write-only. */
+  has_secret: boolean;
+  /** OIDC issuer URL; `null` for Google. */
+  issuer: string | null;
+  /** Lower-case email domains allowed to sign in, e.g. `["example.com"]`. */
+  domains: string[];
+  /** Create an account on first sign-in for an allowed email. */
+  auto_create: boolean;
+  enabled: boolean;
+  updated_at: string | null;
+}
+
+export interface SsoSettings {
+  /** True while at least one provider is enabled (read-only). */
+  enabled: boolean;
+  /** Password sign-up/sign-in for people (admins are unaffected). */
+  password_signin: boolean;
+  providers: SsoProvider[];
+  /** `copper-cloud://HOST:PORT/#sso=<id>&fp=HEX`; `null` while no provider is on. */
+  join_link: string | null;
+  /** `https://HOST/start` landing page to share; `null` while no provider is on. */
+  start_url: string | null;
+}
+
+/** `PUT sso/providers/{id}`: omit `client_secret` to keep the stored one. */
+export interface SsoProviderInput {
+  kind: SsoProviderKind;
+  name: string;
+  client_id: string;
+  client_secret?: string;
+  issuer?: string;
+  domains: string[];
+  auto_create: boolean;
+  enabled: boolean;
+}
+
+export interface SsoPatch {
+  password_signin: boolean;
+}
+
+export interface SsoTestCheck {
+  /** Short label, e.g. "Token endpoint". */
+  name: string;
+  ok: boolean;
+  /** What happened, may include the provider's error code (`invalid_client`). */
+  detail: string | null;
+}
+
+export interface SsoTestResult {
+  ok: boolean;
+  checks: SsoTestCheck[];
+}
+
+// Agent access (integration keys) -------------------------------------------
+
+export interface Integration {
+  id: string;
+  name: string;
+  /** Allowed email domains; empty = the single sign-on domains. */
+  domains: string[];
+  /** May create an account for an allowed email that has none. */
+  create_users: boolean;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  device_count: number;
+}
+
+export interface CreateIntegration {
+  name: string;
+  /** Omit to use the single sign-on domains. */
+  domains?: string[];
+  create_users: boolean;
+}
+
+/** `POST integrations`: the only time `key` (`cai_…`) is visible. */
+export interface CreatedIntegration {
+  integration: Integration;
+  key: string;
+}
+
+/** `POST integrations/{id}/rotate`: the new key, shown once. */
+export interface RotatedIntegrationKey {
+  key: string;
+}
+
+export interface IntegrationDevice {
+  user_email: string;
+  device_id: string;
+  name: string;
+  last_seen_at: string | null;
+}

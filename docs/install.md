@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 From a release tarball (files at the archive root):
 
 ```sh
-tar xzf copper-cloud-0.8.1-linux-aarch64.tar.gz
+tar xzf copper-cloud-0.9.0-linux-aarch64.tar.gz
 sudo ./install.sh
 ```
 
@@ -67,7 +67,7 @@ data stay.
 | `COPPER_CLOUD_MASTER_KEY` | generated | base64url of exactly 32 bytes |
 | `COPPER_CLOUD_BINARY` | — | local binary or release tarball |
 | `COPPER_CLOUD_BINARY_URL` | — | URL of a binary or release tarball |
-| `COPPER_CLOUD_VERSION` | `latest` | GitHub release to fetch (e.g. `0.8.1`) |
+| `COPPER_CLOUD_VERSION` | `latest` | GitHub release to fetch (e.g. `0.9.0`) |
 | `GITHUB_TOKEN` | — | for a private GitHub repository |
 
 `sudo -E` (or `sudo VAR=… sh install.sh`) is needed to pass variables through sudo.
@@ -135,6 +135,7 @@ does not exist the server runs from environment variables alone.
 | `tls.acme_email` | — | ACME contact |
 | `tls.acme_cache_dir` | `/var/lib/copper-cloud/acme` | account + certificate cache |
 | `tls.acme_staging` | `false` | Let's Encrypt staging directory |
+| `tls.fallback_self_signed` | `false` | `acme` only: keep serving the self-signed `tls.cert_path` certificate to clients that do not ask for `tls.domain` (raw IP, no SNI) — see [operations.md](operations.md#adding-a-domain-to-an-existing-self-signed-instance) |
 | `limits.max_blob_bytes` | `8000000` | max decoded sync doc |
 | `limits.max_history_batch` | `2000` | entries per push / max page size |
 | `limits.max_history_entry_bytes` | `16384` | one history entry |
@@ -153,7 +154,7 @@ WebSocket upgrades on `/v1/canvases/*/ws`.
 
 ## Canvases (Canvas Cloud)
 
-Since 0.9.0 canvases are served by a linked [Canvas Cloud](https://github.com/copper-browser/canvas-cloud).
+Since 0.11.0 canvases are served by a linked [Canvas Cloud](https://github.com/copper-browser/canvas-cloud).
 A fresh install runs without one (canvas routes answer `503 canvas_unavailable`; `doctor`
 warns). Install Canvas Cloud — on the same host listening on `127.0.0.1` with TLS off is the
 small setup — create an app key with `canvas-cloud apps create --name "Copper Cloud"

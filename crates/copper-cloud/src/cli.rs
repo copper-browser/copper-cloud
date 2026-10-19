@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use anyhow::{bail, Context as _};
 use clap::{Args, Parser, Subcommand};
 use copper_cloud_core::config::{self, Config, ConfigSource, GenerateOptions, TlsMode};
+use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -39,7 +40,12 @@ pub enum Command {
     /// Apply pending database migrations and exit.
     Migrate,
     /// Print the link code (copper-cloud://HOST:PORT/#k=…&fp=…) Copper uses to connect.
-    LinkCode,
+    LinkCode {
+        /// Print the single sign-on join link (copper-cloud://HOST:PORT/#sso=google…) instead:
+        /// no secret in it, the provider's domain check is the gate.
+        #[arg(long)]
+        sso: bool,
+    },
     /// Check config, database, migrations, TLS and the listener; non-zero exit on failure.
     Doctor,
     /// Wait until the local server answers /healthz (used by install.sh).
@@ -331,6 +337,100 @@ pub enum AdminCommand {
     /// A user's synced browsing history.
     #[command(subcommand)]
     History(HistoryCommand),
+    /// Company single sign-on (Google or OIDC) for Coppers.
+    #[command(subcommand)]
+    Sso(SsoCommand),
+    /// Agent integrations: keys a trusted service (e.g. a bot platform) uses to pair headless
+    /// Coppers to allowed-domain users (`POST /v1/agents/pair`).
+    #[command(subcommand)]
+    Integration(IntegrationCommand),
+    /// Name shown on the /start onboarding page ("" resets to "Copper Cloud").
+    SetInstanceName { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SsoCommand {
+    /// Show the providers (never the secret), password sign-in, the join link and /start URL.
+    Show,
+    /// Create or update the Google provider (an OAuth "Desktop app" client; see docs/sso.md).
+    SetGoogle {
+        #[arg(long)]
+        client_id: String,
+        /// Read the client secret from the first line of stdin (required the first time).
+        #[arg(long)]
+        client_secret_stdin: bool,
+        /// Allowed email domain, e.g. example.com; repeatable, at least one.
+        #[arg(long = "domain", value_name = "DOMAIN", required = true)]
+        domains: Vec<String>,
+        /// Only existing accounts may sign in (no account is created on first sign-in).
+        #[arg(long)]
+        no_auto_create: bool,
+    },
+    /// Create or update a generic OpenID Connect provider (Okta, Entra ID, Keycloak, …).
+    SetOidc {
+        /// Provider id used in links and URLs.
+        #[arg(long, default_value = "oidc")]
+        id: String,
+        /// Issuer URL (https://…); its /.well-known/openid-configuration is used.
+        #[arg(long)]
+        issuer: String,
+        #[arg(long)]
+        client_id: String,
+        /// Read the client secret from the first line of stdin (omit for a public client).
+        #[arg(long)]
+        client_secret_stdin: bool,
+        /// Button label in Copper ("Continue with <name>"); default: the id.
+        #[arg(long)]
+        name: Option<String>,
+        /// Allowed email domain; repeatable, at least one.
+        #[arg(long = "domain", value_name = "DOMAIN", required = true)]
+        domains: Vec<String>,
+        /// Only existing accounts may sign in.
+        #[arg(long)]
+        no_auto_create: bool,
+    },
+    /// Turn a provider (default: all) off, keeping its configuration.
+    Disable {
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Turn a provider (default: all) back on.
+    Enable {
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Delete a provider and its identity links (accounts stay).
+    Delete {
+        #[arg(long)]
+        id: String,
+    },
+    /// Allow (on) or refuse (off) password sign-up/sign-in for Copper users; admins are
+    /// unaffected.
+    PasswordSignin {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IntegrationCommand {
+    /// Mint an integration and print its key once (stdout; the id goes to stderr).
+    Create {
+        #[arg(long)]
+        name: String,
+        /// Allowed email domain; repeatable. Default: the single sign-on domains.
+        #[arg(long = "domain", value_name = "DOMAIN")]
+        domains: Vec<String>,
+        /// Never create accounts: only existing users can be paired.
+        #[arg(long)]
+        no_create_users: bool,
+    },
+    /// List integrations (never the keys).
+    List,
+    /// Replace an integration's key (the old one stops working) and print the new key once.
+    Rotate { id: Uuid },
+    /// Revoke an integration: its key stops working and its agent devices are signed out.
+    Revoke { id: Uuid },
 }
 
 #[derive(Subcommand, Debug)]
@@ -457,10 +557,15 @@ pub fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             })?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::LinkCode => {
+        Command::LinkCode { sso: true } => {
+            let cfg = load_config(cli.config)?;
+            runtime()?.block_on(crate::admin::sso_link_code(&cfg))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::LinkCode { sso: false } => {
             let cfg = load_config(cli.config)?;
             let code = copper_cloud_core::tls::link_code(&cfg).with_context(|| {
-                if cfg.tls.mode == TlsMode::SelfSigned {
+                if copper_cloud_core::tls::serves_self_signed(&cfg) {
                     "no certificate yet — run `copper-cloud tls-init` (or start the server) first"
                 } else {
                     "building link code"
@@ -716,7 +821,7 @@ fn print_status(v: &serde_json::Value) {
 }
 
 fn tls_init(cfg: &Config, force: bool, extra: &[String]) -> anyhow::Result<()> {
-    if cfg.tls.mode != TlsMode::SelfSigned {
+    if !copper_cloud_core::tls::serves_self_signed(cfg) {
         println!("tls.mode = {}: nothing to generate", cfg.tls.mode);
         return Ok(());
     }

@@ -5,6 +5,7 @@
 //! a per-person access key, see [`access`]).
 
 pub mod access;
+pub mod agents;
 pub mod app;
 pub mod auth;
 pub mod config;
@@ -19,6 +20,7 @@ pub mod link;
 pub mod observe;
 pub mod pairing;
 pub mod shutdown;
+pub mod sso;
 pub mod state;
 pub mod sync;
 pub mod tls;

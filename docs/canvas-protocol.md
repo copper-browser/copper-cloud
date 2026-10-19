@@ -3,7 +3,7 @@
 The canvas wire protocol, document schema, ops and read formats moved with the canvas server
 to **Canvas Cloud**: [docs/canvas-protocol.md](https://github.com/copper-browser/canvas-cloud/blob/main/docs/canvas-protocol.md)
 in [copper-browser/canvas-cloud](https://github.com/copper-browser/canvas-cloud). Nothing about
-the protocol changed: copper-cloud 0.9.0 proxies it unchanged ([canvas-link.md](canvas-link.md)).
+the protocol changed: copper-cloud 0.11.0 proxies it unchanged ([canvas-link.md](canvas-link.md)).
 
 ## Wire protocol
 

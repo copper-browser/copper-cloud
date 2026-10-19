@@ -10,10 +10,16 @@ every signed-in Copper the instance's AI keys (Jev + LLM router), set once by th
 nobody pastes keys by hand.
 
 Shared canvases (live Yjs rooms, chat, mentions, invites, share links) are served by a linked
-[Canvas Cloud](https://github.com/copper-browser/canvas-cloud) (since 0.9.0): copper-cloud
+[Canvas Cloud](https://github.com/copper-browser/canvas-cloud) (since 0.11.0): copper-cloud
 proxies the unchanged canvas API to it as the signed-in user, so Coppers need no update. See
-[docs/canvas-link.md](docs/canvas-link.md); upgrading a 0.8.x instance with canvases:
+[docs/canvas-link.md](docs/canvas-link.md); upgrading a 0.10.x (or older) instance with canvases:
 [docs/canvas-migration.md](docs/canvas-migration.md).
+
+People can join with **company single sign-on** (Google Workspace or any OpenID Connect
+provider): share one `https://HOST/start` page, they install Copper and click *Continue with
+Google* — no account to create, no password ([docs/sso.md](docs/sso.md)). **Agent
+integrations** let a trusted service pair headless Coppers (e.g. one per bot) to its owners'
+accounts ([docs/sso.md](docs/sso.md#agent-integrations)).
 
 ## Install on a VM (Ubuntu 22.04/24.04, Debian 12, Amazon Linux 2023, Fedora)
 
@@ -24,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 or from a release tarball:
 
 ```sh
-tar xzf copper-cloud-0.8.1-linux-x86_64.tar.gz && sudo ./install.sh
+tar xzf copper-cloud-0.9.0-linux-x86_64.tar.gz && sudo ./install.sh
 ```
 
 The installer sets up Postgres (unless you pass `DATABASE_URL`), a `copper-cloud` system user,
@@ -98,19 +104,22 @@ on `127.0.0.1:9464`. Every config key can be overridden with `COPPER_CLOUD_<KEY>
 |---|---|
 | `copper-cloud [serve]` | run the server (applies migrations first; `--no-migrate` to skip) |
 | `copper-cloud migrate` | apply database migrations |
-| `copper-cloud link-code` | print the link code |
-| `copper-cloud doctor` | check config, database, migrations, TLS, listener, Canvas Cloud link |
+| `copper-cloud link-code [--sso]` | print the link code (`--sso`: the single sign-on join link, no secret) |
+| `copper-cloud doctor` | check config, database, migrations, TLS, listener, SSO, Canvas Cloud link |
 | `copper-cloud healthcheck --wait 60` | wait for `/healthz` (pinned TLS) |
 | `copper-cloud tls-init [--force] [--name N]` | create the self-signed certificate |
 | `copper-cloud init-config --write PATH` | write a config with fresh keys |
 | `copper-cloud admin users\|create-user\|reset-password\|delete-user\|disable-user\|enable-user\|disable-signup\|enable-signup` | user administration |
 | `copper-cloud admin create-admin\|reset-admin-password\|list-admins\|delete-admin` | portal admin accounts |
 | `copper-cloud admin access-mode\|set-access-mode open\|directory\|create-access-key` | who may pass the gate |
+| `copper-cloud admin sso show\|set-google\|set-oidc\|disable\|enable\|delete\|password-signin on\|off` | company single sign-on (client secret from stdin only, never shown) |
+| `copper-cloud admin integration create\|list\|rotate\|revoke` | agent-integration keys (`cai_…`, printed once) |
+| `copper-cloud admin set-instance-name NAME` | the name on the `/start` onboarding page |
 | `copper-cloud admin history delete --user EMAIL\|UUID [--since T] [--until T] [--device ID] [--dry-run]` | delete (or count) a user's synced history wholesale, by time window/device only (never by content) |
 | `copper-cloud intelligence set\|show\|clear\|enable\|disable` | cloud-wide Jev + LLM router keys every signed-in Copper receives (keys from files/stdin, shown masked), plus the org-wide agent round budget (`--agent-max-turns`, `clear --agent`) |
 | `copper-cloud canvas link --url URL --key-file F [--fingerprint HEX] [--no-sync]` | link a Canvas Cloud (app key from a file/stdin, never argv) and provision every user |
 | `copper-cloud canvas unlink\|status\|sync-users [--prune]` | remove the link / show it and test it / push every user now (`--prune`: also delete Canvas Cloud users that no longer exist here) |
-| `copper-cloud canvas migrate [--dry-run] [--only ID]… [--replace] [--concurrency N] [--json]` | copy 0.8.x canvases into the linked Canvas Cloud, verified by digest ([docs/canvas-migration.md](docs/canvas-migration.md)) |
+| `copper-cloud canvas migrate [--dry-run] [--only ID]… [--replace] [--concurrency N] [--json]` | copy legacy canvases into the linked Canvas Cloud, verified by digest ([docs/canvas-migration.md](docs/canvas-migration.md)) |
 | `copper-cloud version` | version |
 
 All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`, env
@@ -123,7 +132,7 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
 - [Admin API](docs/admin-api.md) — the admin portal's `/admin/api/*` contract
 - [Canvas link](docs/canvas-link.md) — how canvases are served by a linked Canvas Cloud:
   proxy, events, provisioning, linking, security
-- [Canvas migration](docs/canvas-migration.md) — moving 0.8.x canvases to Canvas Cloud
+- [Canvas migration](docs/canvas-migration.md) — moving legacy canvases to Canvas Cloud
   (runbook, rollback)
 - [Canvas](docs/canvas.md) · [Canvas protocol](docs/canvas-protocol.md) — pointers to the
   canvas API, now documented in Canvas Cloud
@@ -131,8 +140,9 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
   encryption at rest, TLS pinning
 - [Install](docs/install.md) — VM one-liner, manual install, configuration reference
 - [Operations](docs/operations.md) — doctor, logs, metrics, backups, upgrades
-- [Onboarding a team](docs/onboarding.md) — issuing link codes, people, keeping links valid
-- [v0.8.1 release notes](docs/v0.8.1.md) · [v0.8.0](docs/v0.8.0.md) · [v0.7.0](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
+- [Onboarding a team](docs/onboarding.md) — single sign-on first, link codes, people, keeping links valid
+- [Single sign-on + agent integrations](docs/sso.md) — Google / OIDC setup, `/start`, agent pairing
+- [v0.9.0 release notes](docs/v0.9.0.md) · [v0.8.1](docs/v0.8.1.md) · [v0.8.0](docs/v0.8.0.md) · [v0.7.0](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
 
 ## Development
 
