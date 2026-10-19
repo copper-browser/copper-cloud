@@ -12,6 +12,7 @@ import {
   LogInIcon,
   type LucideIcon,
   PlusIcon,
+  PuzzleIcon,
   RectangleEllipsisIcon,
   SettingsIcon,
   ShieldCheckIcon,
@@ -51,6 +52,7 @@ const AUDIT_ICONS: Record<AuditIcon, LucideIcon> = {
   ai: SparklesIcon,
   sso: ShieldCheckIcon,
   agent: BotIcon,
+  addon: PuzzleIcon,
   other: ActivityIcon,
 };
 

@@ -104,7 +104,7 @@ Key only (no session). Lets a client validate a link code before showing account
 ```json
 {
   "name": "copper-cloud",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "signup": true,
   "access_mode": "directory",
   "features": ["history_delete", "sso", "agent_pairing", "canvas_link"],
@@ -126,6 +126,7 @@ only ever grows, and an absent field (older servers) means none of them:
 | `history_delete` | 0.8.0 | [`DELETE /v1/sync/history`](#delete-v1synchistory) and the `history_deleted` event |
 | `sso` | 0.9.0 | [`GET /v1/auth/sso`](#get-v1authsso--no-gate-header) and [`POST /v1/auth/sso/{provider_id}`](#post-v1authssoprovider_id--no-gate-header) |
 | `agent_pairing` | 0.9.0 | [`POST /v1/agents/pair`](#post-v1agentspair--no-gate-header) and device-bound pairing codes |
+| `addons` | 0.10.0 | [`GET /v1/addons`](#addons) and the `addons` event |
 | `canvas_link` | 0.11.0 | canvases are served by a linked Canvas Cloud through this server ([canvas-link.md](canvas-link.md)); the canvas API itself is unchanged |
 
 `canvas` (0.11.0+): `linked` is `true` while a Canvas Cloud is linked and enabled. When it is
@@ -650,6 +651,9 @@ data: {"type":"history_deleted","deleted":3,"since":null,"until":null,"device":n
 event: canvas
 data: {"type":"canvas","canvas_id":"…","kind":"created"}
 
+event: addons
+data: {"type":"addons"}
+
 event: resync
 data: {"skipped":12}
 
@@ -664,6 +668,10 @@ data: {"skipped":12}
   `device` (`null` = every device); `seqs` is omitted. A delete by seq has `since` / `until` /
   `device` `null` and `seqs` = how many distinct seqs were asked for. Deletes made with the
   admin CLI send no event.
+- `addons` goes to **every** connected user whenever an admin changes any addon (upload,
+  on/off, audience, settings, priority, version, delete): refetch
+  [`GET /v1/addons`](#addons) with `If-None-Match` (cheap when nothing changed for you).
+  Changes made with the server CLI send no event.
 - `resync`: this stream fell behind and dropped events; do a full pull
   (`GET /v1/sync/docs` + history from your cursor).
 - A `: keepalive` comment every 15 s. The stream ends on server shutdown, when the session is
@@ -717,6 +725,58 @@ LiteLLM or Jev key. Same gate and session as every other `/v1` user endpoint (ga
 - Re-fetch at launch and periodically; when a block turns `null`, stop using the key you had.
 - Reads are recorded in the admin audit log (`intelligence.read`, at most once per user per
   hour). Keys never appear in server logs.
+
+---
+
+## Addons 🔒
+
+Web bundles that replace a slot of the Copper window (concepts, manifest, bundle format:
+[addons.md](addons.md)). Same gate and session as every other `/v1` user endpoint. A server
+without addons answers `404` here: treat that as "no addons".
+
+### `GET /v1/addons`
+
+What the caller gets: per slot at most one addon (enabled, audience `everyone` or listing the
+caller's email, highest `priority`, then most recently changed).
+
+```json
+// 200, ETag: "r_3f9a0c1d2e4b5a69", Cache-Control: no-store
+{
+  "revision": "r_3f9a0c1d2e4b5a69",
+  "addons": [
+    {
+      "id": "com.example.notes-sidebar",
+      "slot": "agent-sidebar",
+      "name": "Notes sidebar",
+      "version": "1.0.0",
+      "sha256": "<64 hex: SHA-256 of the served bundle>",
+      "size": 123456,
+      "entry": "index.html",
+      "bridge": 1,
+      "platforms": ["mac", "linux", "windows"],
+      "permissions": { "hosts": ["api.example.com"], "capabilities": ["identity", "storage"] },
+      "settings": { "apiUrl": "https://api.example.com", "pageSize": 20 },
+      "bundle": "/v1/addons/com.example.notes-sidebar/bundle/<sha256>",
+      "updated_at": "2026-10-19T18:04:05.123Z"
+    }
+  ]
+}
+```
+
+- `revision` = `r_` + the first 16 hex of SHA-256 over the resolved list's ids, slots,
+  bundle hashes and settings; it changes exactly when what this person should run changes.
+  Send it back as `If-None-Match` (quoted ETag or the bare revision) → `304` with no body.
+- `platforms` is always listed (all three when the manifest names none); filter on the client.
+- `settings` = manifest defaults overlaid by the admin's values; settings with neither are
+  absent. Values may be credentials: keep them like secrets.
+- `size` is the served bundle's byte length (verify before and after downloading).
+
+### `GET /v1/addons/{id}/bundle/{sha256}`
+
+The served bundle (`application/json`, `copper-addon-bundle/1`; [format](addons.md#bundles)),
+only while that addon version is what `GET /v1/addons` resolves for the caller — otherwise
+`404`. `Cache-Control: private, max-age=31536000, immutable`, `ETag: "<sha256>"`. Check that
+SHA-256 of the body equals `{sha256}` before using it.
 
 ---
 

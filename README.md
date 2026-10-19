@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 or from a release tarball:
 
 ```sh
-tar xzf copper-cloud-0.9.0-linux-x86_64.tar.gz && sudo ./install.sh
+tar xzf copper-cloud-0.11.0-linux-x86_64.tar.gz && sudo ./install.sh
 ```
 
 The installer sets up Postgres (unless you pass `DATABASE_URL`), a `copper-cloud` system user,
@@ -117,6 +117,7 @@ on `127.0.0.1:9464`. Every config key can be overridden with `COPPER_CLOUD_<KEY>
 | `copper-cloud admin set-instance-name NAME` | the name on the `/start` onboarding page |
 | `copper-cloud admin history delete --user EMAIL\|UUID [--since T] [--until T] [--device ID] [--dry-run]` | delete (or count) a user's synced history wholesale, by time window/device only (never by content) |
 | `copper-cloud intelligence set\|show\|clear\|enable\|disable` | cloud-wide Jev + LLM router keys every signed-in Copper receives (keys from files/stdin, shown masked), plus the org-wide agent round budget (`--agent-max-turns`, `clear --agent`) |
+| `copper-cloud addons list\|slots\|upload FILE --slot SLOT\|enable ID --everyone\|--people a@x,b@y\|disable ID\|settings ID --json '{…}'\|delete ID --yes` | addons: web bundles that replace a slot of the Copper window (e.g. the agent sidebar), handed to everyone or listed people ([docs/addons.md](docs/addons.md)); also `copper-cloud admin addons …` |
 | `copper-cloud canvas link --url URL --key-file F [--fingerprint HEX] [--no-sync]` | link a Canvas Cloud (app key from a file/stdin, never argv) and provision every user |
 | `copper-cloud canvas unlink\|status\|sync-users [--prune]` | remove the link / show it and test it / push every user now (`--prune`: also delete Canvas Cloud users that no longer exist here) |
 | `copper-cloud canvas migrate [--dry-run] [--only ID]… [--replace] [--concurrency N] [--json]` | copy legacy canvases into the linked Canvas Cloud, verified by digest ([docs/canvas-migration.md](docs/canvas-migration.md)) |
@@ -130,6 +131,7 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
 - [Architecture](docs/architecture.md) — components, data model, request path
 - [HTTP API](docs/api.md) — every endpoint with requests and responses
 - [Admin API](docs/admin-api.md) — the admin portal's `/admin/api/*` contract
+- [Addons](docs/addons.md) — slot addons: manifest, bundles, who gets what, API, CLI, security
 - [Canvas link](docs/canvas-link.md) — how canvases are served by a linked Canvas Cloud:
   proxy, events, provisioning, linking, security
 - [Canvas migration](docs/canvas-migration.md) — moving legacy canvases to Canvas Cloud
@@ -142,7 +144,7 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
 - [Operations](docs/operations.md) — doctor, logs, metrics, backups, upgrades
 - [Onboarding a team](docs/onboarding.md) — single sign-on first, link codes, people, keeping links valid
 - [Single sign-on + agent integrations](docs/sso.md) — Google / OIDC setup, `/start`, agent pairing
-- [v0.9.0 release notes](docs/v0.9.0.md) · [v0.8.1](docs/v0.8.1.md) · [v0.8.0](docs/v0.8.0.md) · [v0.7.0](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
+- [v0.11.0 release notes](docs/v0.11.0.md) · [v0.10.0](docs/v0.10.0.md) · [v0.9.0](docs/v0.9.0.md) · [v0.8.1](docs/v0.8.1.md) · [v0.8.0](docs/v0.8.0.md) · [v0.7.0](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
 
 ## Development
 

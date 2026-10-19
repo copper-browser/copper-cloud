@@ -15,6 +15,7 @@ export type AuditIcon =
   | "ai"
   | "sso"
   | "agent"
+  | "addon"
   | "other";
 
 export interface AuditLine {
@@ -155,6 +156,11 @@ export function describeAudit(entry: AuditEntry, self: boolean): AuditLine {
       };
     case "pairing_code.revoke":
       return { icon: "pairing", verb: "revoked a pairing code" };
+    case "addon.create":
+    case "addon.upload":
+    case "addon.update":
+    case "addon.delete":
+      return describeAddonAudit(entry, d);
     default:
       return (
         describeAccess(entry.action, d, entry.target) ?? {
@@ -241,4 +247,38 @@ function describeAccess(
     };
   }
   return undefined;
+}
+
+/** `addon.*` rows. `target` is the addon id; updates list what changed. */
+function describeAddonAudit(entry: AuditEntry, d: Record<string, unknown>): AuditLine {
+  const object = str(d.name) ?? str(entry.target) ?? str(d.id) ?? "an addon";
+  const version = str(d.version);
+  const actor = d.via === "cli" ? "The server CLI" : undefined;
+  const line = (verb: string, suffix?: string): AuditLine => ({
+    icon: "addon",
+    verb,
+    object,
+    suffix,
+    actor,
+  });
+  switch (entry.action) {
+    case "addon.create":
+      return line("uploaded addon", version ? `(${version}, off)` : undefined);
+    case "addon.upload":
+      return line(version ? `uploaded ${version} of` : "uploaded a new version of");
+    case "addon.delete":
+      return line("deleted addon");
+  }
+  const changes: AuditLine[] = [];
+  if (typeof d.enabled === "boolean")
+    changes.push(line(d.enabled ? "turned on" : "turned off"));
+  if (d.audience === "everyone") changes.push(line("made", "available to everyone"));
+  else if (d.audience === "people" || d.people !== undefined)
+    changes.push(line("changed who gets"));
+  if (d.settings !== undefined) changes.push(line("changed the settings of"));
+  if (typeof d.priority === "number")
+    changes.push(line("set the priority of", `to ${d.priority}`));
+  const current = str(d.current_version);
+  if (current) changes.push(line(`made ${current} current for`));
+  return changes.length === 1 ? changes[0]! : line("updated addon");
 }

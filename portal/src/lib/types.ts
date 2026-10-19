@@ -322,7 +322,11 @@ export type AuditAction =
   | "pairing_code.revoke"
   | "intelligence.update"
   | "intelligence.clear"
-  | "intelligence.read";
+  | "intelligence.read"
+  | "addon.create"
+  | "addon.upload"
+  | "addon.update"
+  | "addon.delete";
 
 export interface AuditEntry {
   /** Sequence number, not a UUID. */
@@ -439,4 +443,206 @@ export interface IntegrationDevice {
   device_id: string;
   name: string;
   last_seen_at: string | null;
+}
+
+// Addons ------------------------------------------------------------------
+//
+// Every addon field the portal reads is declared here, and `normalizeAddon`
+// is the only code that touches the raw JSON. If the server's row shape moves,
+// this section is the one place to change.
+
+export type AddonAudience = "everyone" | "people";
+export type AddonPlatform = "mac" | "linux" | "windows";
+export type AddonSettingType = "string" | "number" | "boolean" | "object" | "array";
+
+/** One entry of `manifest.settings`. */
+export interface AddonSettingSpec {
+  type: AddonSettingType;
+  default?: unknown;
+  title?: string;
+  description?: string;
+}
+
+/** `manifest.json`, schema `copper-addon/1`. Unknown keys are kept. */
+export interface AddonManifest {
+  schema: string;
+  id: string;
+  name: string;
+  version: string;
+  slot: string;
+  entry: string;
+  description?: string;
+  author?: string;
+  bridge: number;
+  permissions?: { hosts?: string[]; capabilities?: string[] };
+  settings?: Record<string, AddonSettingSpec>;
+  platforms?: AddonPlatform[];
+  [key: string]: unknown;
+}
+
+/** `GET addons/slots`: the closed list of slots this server accepts. */
+export interface AddonSlot {
+  id: string;
+  name: string;
+  description: string;
+}
+
+/** Someone in an addon's audience. Emails work before the person signs up. */
+export interface AddonPerson {
+  email: string;
+  name: string | null;
+  /** `null` until someone with this email has an account. */
+  user_id: string | null;
+}
+
+export interface AddonVersion {
+  version: string;
+  /** Lowercase hex SHA-256 of the served bundle. */
+  sha256: string;
+  size_bytes: number;
+  created_at: string;
+  /** Admin email; `null` for the server CLI or a deleted admin. */
+  uploaded_by: string | null;
+}
+
+/** A row of `GET addons` (also `GET`/`PATCH addons/:id` and the upload response). */
+export interface Addon {
+  /** The manifest id, e.g. `example.notes-sidebar`. */
+  id: string;
+  slot: string;
+  name: string;
+  /** Off by default. */
+  enabled: boolean;
+  audience: AddonAudience;
+  people: AddonPerson[];
+  /** Admin-set values only; manifest defaults fill the rest. */
+  settings: Record<string, unknown>;
+  priority: number;
+  revision: number;
+  current: AddonVersion | null;
+  /** Newest first. */
+  versions: AddonVersion[];
+  /** The current version's manifest. */
+  manifest: AddonManifest | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `PATCH addons/:id`. `people` replaces the whole set. */
+export interface AddonPatch {
+  enabled?: boolean;
+  audience?: AddonAudience;
+  people?: string[];
+  settings?: Record<string, unknown>;
+  priority?: number;
+  current_version?: string;
+}
+
+type Raw = Record<string, unknown>;
+const isRaw = (v: unknown): v is Raw => typeof v === "object" && v !== null;
+const text = (v: unknown, fallback = ""): string =>
+  typeof v === "string" ? v : fallback;
+const textOrNull = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+const num = (v: unknown, fallback = 0): number =>
+  typeof v === "number" && Number.isFinite(v) ? v : fallback;
+
+function normalizeVersion(raw: unknown): AddonVersion | null {
+  if (!isRaw(raw) || typeof raw.version !== "string") return null;
+  return {
+    version: raw.version,
+    sha256: text(raw.sha256),
+    size_bytes: num(raw.size_bytes ?? raw.size),
+    created_at: text(raw.created_at ?? raw.uploaded_at),
+    uploaded_by: textOrNull(raw.uploaded_by),
+  };
+}
+
+function normalizePerson(raw: unknown): AddonPerson | null {
+  if (typeof raw === "string") return { email: raw, name: null, user_id: null };
+  if (!isRaw(raw) || typeof raw.email !== "string") return null;
+  return {
+    email: raw.email,
+    name: textOrNull(raw.name ?? raw.display_name),
+    user_id: textOrNull(raw.user_id ?? raw.id),
+  };
+}
+
+const semverParts = (v: string) => v.split(/[.+-]/).map((p) => Number(p) || 0);
+function newestFirst(a: AddonVersion, b: AddonVersion): number {
+  const t = Date.parse(b.created_at) - Date.parse(a.created_at);
+  if (t) return t;
+  const [x, y] = [semverParts(a.version), semverParts(b.version)];
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return (y[i] ?? 0) - (x[i] ?? 0);
+  return 0;
+}
+
+/**
+ * Raw `/admin/api/addons*` JSON → {@link Addon}. Tolerates both spellings the
+ * docs have used (`size`/`size_bytes`, `uploaded_at`/`created_at`, people as
+ * `{id,email,name}` or `{email,name,user_id}`) and missing optional blocks.
+ */
+export function normalizeAddon(raw: unknown): Addon {
+  const r: Raw = isRaw(raw) ? raw : {};
+  const manifest = isRaw(r.manifest) ? (r.manifest as AddonManifest) : null;
+  const current = normalizeVersion(r.current);
+  const versions = (Array.isArray(r.versions) ? r.versions : [])
+    .map(normalizeVersion)
+    .filter((v): v is AddonVersion => v !== null)
+    .sort(newestFirst);
+  if (current && !versions.some((v) => v.version === current.version)) {
+    versions.unshift(current);
+  }
+  const people = (Array.isArray(r.people) ? r.people : [])
+    .map(normalizePerson)
+    .filter((p): p is AddonPerson => p !== null);
+  return {
+    id: text(r.id),
+    slot: text(r.slot, manifest?.slot ?? ""),
+    name: text(r.name, manifest?.name ?? text(r.id)),
+    enabled: r.enabled === true,
+    audience: r.audience === "everyone" ? "everyone" : "people",
+    people,
+    settings: isRaw(r.settings) && !Array.isArray(r.settings) ? r.settings : {},
+    priority: num(r.priority),
+    revision: num(r.revision, 1),
+    current,
+    versions,
+    manifest,
+    created_at: text(r.created_at),
+    updated_at: text(r.updated_at),
+  };
+}
+
+/** `GET addons` → rows. Accepts a bare array or a `{items}` / `{addons}` wrapper. */
+export function normalizeAddonList(raw: unknown): Addon[] {
+  const rows = Array.isArray(raw)
+    ? raw
+    : isRaw(raw) && Array.isArray(raw.items)
+      ? raw.items
+      : isRaw(raw) && Array.isArray(raw.addons)
+        ? raw.addons
+        : [];
+  return rows.map(normalizeAddon);
+}
+
+/** What an upload did, when the server says (`created`, `new_version`, `unchanged`). */
+export type AddonUploadOutcome = "created" | "new_version" | "unchanged";
+
+export interface AddonUpload {
+  addon: Addon;
+  outcome: AddonUploadOutcome | null;
+}
+
+/**
+ * `POST addons` → the row. The server sends the row with an `upload` field
+ * (`created`, `new_version`, `unchanged`); a `{outcome, addon}` wrapper is
+ * accepted too.
+ */
+export function normalizeAddonUpload(raw: unknown): AddonUpload {
+  const r: Raw = isRaw(raw) ? raw : {};
+  const wrapped = isRaw(r.addon) && typeof r.id !== "string";
+  const said = r.upload ?? r.outcome;
+  const outcome =
+    said === "created" || said === "new_version" || said === "unchanged" ? said : null;
+  return { addon: normalizeAddon(wrapped ? r.addon : raw), outcome };
 }

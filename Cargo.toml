@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.11.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/copper-browser/copper-cloud"
@@ -93,6 +93,10 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # portal (static export embedded at build time; debug builds read the folder at run time)
 rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess", "include-exclude"] }
+
+# addons: `.copperaddon` uploads are zip files. Read-only use; Deflate (pure-Rust zlib-rs
+# backend) and Stored are the only methods accepted.
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # HTTP client: SSO provider calls (core), the canvas link (HTTP + WebSocket client to a
 # linked Canvas Cloud; rustls `ring`, no aws-lc) and the test suites

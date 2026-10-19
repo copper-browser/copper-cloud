@@ -8,6 +8,7 @@ import {
   LaptopIcon,
   LayoutGridIcon,
   LogOutIcon,
+  PuzzleIcon,
   SettingsIcon,
   ShieldCheckIcon,
   SparklesIcon,
@@ -37,6 +38,7 @@ const NAV = [
   { href: "/canvases/", label: "Canvases", icon: FrameIcon },
   { href: "/canvas-cloud/", label: "Canvas Cloud", icon: CloudIcon },
   { href: "/intelligence/", label: "AI keys", icon: SparklesIcon },
+  { href: "/addons/", label: "Addons", icon: PuzzleIcon },
   { href: "/settings/", label: "Settings", icon: SettingsIcon },
 ] as const;
 

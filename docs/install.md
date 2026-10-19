@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 From a release tarball (files at the archive root):
 
 ```sh
-tar xzf copper-cloud-0.9.0-linux-aarch64.tar.gz
+tar xzf copper-cloud-0.11.0-linux-aarch64.tar.gz
 sudo ./install.sh
 ```
 
@@ -67,7 +67,7 @@ data stay.
 | `COPPER_CLOUD_MASTER_KEY` | generated | base64url of exactly 32 bytes |
 | `COPPER_CLOUD_BINARY` | — | local binary or release tarball |
 | `COPPER_CLOUD_BINARY_URL` | — | URL of a binary or release tarball |
-| `COPPER_CLOUD_VERSION` | `latest` | GitHub release to fetch (e.g. `0.9.0`) |
+| `COPPER_CLOUD_VERSION` | `latest` | GitHub release to fetch (e.g. `0.11.0`) |
 | `GITHUB_TOKEN` | — | for a private GitHub repository |
 
 `sudo -E` (or `sudo VAR=… sh install.sh`) is needed to pass variables through sudo.
@@ -140,6 +140,7 @@ does not exist the server runs from environment variables alone.
 | `limits.max_history_batch` | `2000` | entries per push / max page size |
 | `limits.max_history_entry_bytes` | `16384` | one history entry |
 | `limits.auth_per_minute` | `10` | auth requests per IP per minute |
+| `limits.max_addon_bytes` | `16777216` | max uploaded addon zip (`.copperaddon`), 1 KiB–256 MiB |
 
 Unknown keys in the file are rejected (typo protection); unknown `COPPER_CLOUD_*` environment
 variables are ignored (the installer's inputs share the prefix).
