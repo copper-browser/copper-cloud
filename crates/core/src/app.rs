@@ -33,6 +33,8 @@ pub const ADMIN_LOGIN_PATH: &str = "/admin/api/login";
 pub const FEATURES: &[&str] = &[
     // `DELETE /v1/sync/history` (0.8.0).
     "history_delete",
+    // Canvases are served by a linked Canvas Cloud (0.9.0; see `canvas` in `/v1/info`).
+    "canvas_link",
 ];
 
 /// Core `/v1` routes (auth, pairing, devices, sync, intelligence, info). Paths are relative to `/v1`.

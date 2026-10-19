@@ -653,7 +653,8 @@ async fn info_lists_features() {
         .json()
         .await
         .unwrap();
-    assert_eq!(info["features"], json!(["history_delete"]));
+    assert_eq!(info["features"], json!(["history_delete", "canvas_link"]));
+    assert_eq!(info["canvas"], json!({ "linked": false }));
     assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
 }
 

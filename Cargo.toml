@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/canvas", "crates/copper-cloud"]
+members = [
+  "crates/core",
+  "crates/canvas-link",
+  "crates/canvas-migrate",
+  "crates/copper-cloud",
+]
 
 [workspace.package]
 version = "0.8.1"
@@ -28,7 +33,8 @@ must_use_candidate = "allow"
 # which keeps x86_64 + aarch64 cross builds simple.
 [workspace.dependencies]
 copper-cloud-core = { path = "crates/core" }
-copper-cloud-canvas = { path = "crates/canvas" }
+copper-cloud-canvas-link = { path = "crates/canvas-link" }
+copper-cloud-canvas-migrate = { path = "crates/canvas-migrate" }
 
 anyhow = "1"
 thiserror = "2"
@@ -88,8 +94,11 @@ clap = { version = "4", features = ["derive", "env"] }
 # portal (static export embedded at build time; debug builds read the folder at run time)
 rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess", "include-exclude"] }
 
-# test-only
+# canvas link (HTTP + WebSocket client to a linked Canvas Cloud; rustls `ring`, no aws-lc)
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+url = "2"
+webpki-roots = "1"
 
 [profile.release]
 lto = "thin"

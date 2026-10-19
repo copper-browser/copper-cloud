@@ -203,7 +203,61 @@ async fn check_database(r: &mut Report, cfg: &Config) {
             ),
         );
     }
+    check_canvas_link(r, cfg, &pool).await;
     pool.close().await;
+}
+
+/// `canvas-link`: ok when linked and reachable (app key accepted), warn when not linked,
+/// FAIL when linked but unreachable or refusing the key.
+async fn check_canvas_link(r: &mut Report, cfg: &Config, pool: &sqlx::PgPool) {
+    use copper_cloud_canvas_link::{settings, upstream::Upstream};
+    const CHECK: &str = "canvas-link";
+    let crypto = copper_cloud_core::crypto::Crypto::from_master_key(&cfg.master_key);
+    let link = match settings::load(pool, &crypto).await {
+        Ok(Some(link)) => link,
+        Ok(None) => {
+            r.line(
+                Level::Warn,
+                CHECK,
+                "no Canvas Cloud linked: canvases are unavailable — copper-cloud canvas link --url … --key-file …",
+            );
+            return;
+        }
+        Err(err) => {
+            r.line(Level::Warn, CHECK, format!("cannot read the link: {err}"));
+            return;
+        }
+    };
+    if !link.enabled {
+        r.line(
+            Level::Warn,
+            CHECK,
+            format!("{} is linked but disabled", link.base()),
+        );
+        return;
+    }
+    let upstream = match Upstream::new(&link) {
+        Ok(u) => u,
+        Err(err) => {
+            r.line(Level::Fail, CHECK, format!("{err:#}"));
+            return;
+        }
+    };
+    match upstream.check(PROBE_TIMEOUT).await {
+        Ok(probe) => r.line(
+            Level::Ok,
+            CHECK,
+            format!(
+                "{} (Canvas Cloud {}, {} users, {} canvases, {} ms)",
+                link.base(),
+                probe.version.as_deref().unwrap_or("?"),
+                probe.stats.users,
+                probe.stats.canvases,
+                probe.latency.as_millis()
+            ),
+        ),
+        Err(err) => r.line(Level::Fail, CHECK, format!("{}: {err}", link.base())),
+    }
 }
 
 fn check_tls(r: &mut Report, cfg: &Config) {

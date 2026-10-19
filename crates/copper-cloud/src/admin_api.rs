@@ -16,7 +16,9 @@ use axum::http::{header, HeaderMap, HeaderValue, Method};
 use axum::middleware::{from_fn, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
+use copper_cloud_canvas_link::admin::{self as link_admin, Actor, LinkError};
+use copper_cloud_canvas_link::{provision, CanvasLink};
 use copper_cloud_core::access::{self, AccessMode, NewAccessKey};
 use copper_cloud_core::auth;
 use copper_cloud_core::config::TlsMode;
@@ -59,6 +61,13 @@ pub fn router() -> Router<SharedState> {
         .route("/devices/{id}", delete(delete_device))
         .route("/canvases", get(list_canvases))
         .route("/canvases/{id}", delete(delete_canvas))
+        .route(
+            "/canvas-link",
+            get(get_canvas_link)
+                .put(put_canvas_link)
+                .delete(delete_canvas_link),
+        )
+        .route("/canvas-link/test", post(test_canvas_link))
         .route("/pairing-codes", get(list_pairing_codes))
         .route("/pairing-codes/{id}", delete(revoke_pairing_code))
         .route("/audit", get(list_audit))
@@ -478,18 +487,22 @@ async fn change_password(
 // ---------------------------------------------------------------------------------------------
 // Overview + settings
 
-async fn overview(State(state): State<SharedState>, _s: AdminSession) -> ApiResult<Json<Value>> {
-    let (users, devices, canvases, keys): (i64, i64, i64, i64) = sqlx::query_as(
+async fn overview(
+    State(state): State<SharedState>,
+    Extension(link): Extension<CanvasLink>,
+    _s: AdminSession,
+) -> ApiResult<Json<Value>> {
+    let (users, devices, keys): (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM users),
                 (SELECT count(*) FROM devices),
-                (SELECT count(*) FROM canvases),
                 (SELECT count(*) FROM access_keys
                  WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())
                    AND (max_uses IS NULL OR uses < max_uses))",
     )
     .fetch_one(&state.db)
     .await?;
-    let rooms = copper_cloud_canvas::rooms_metrics();
+    // Canvases live on the linked Canvas Cloud: null when unlinked or unreachable.
+    let canvas = link_admin::stats(&link).await;
     let mode = access::access_mode(&state).await?;
     let fingerprint = match state.cfg.tls.mode {
         TlsMode::Acme => None,
@@ -503,10 +516,10 @@ async fn overview(State(state): State<SharedState>, _s: AdminSession) -> ApiResu
         "counts": {
             "users": users,
             "devices": devices,
-            "canvases": canvases,
+            "canvases": canvas.map(|c| c.canvases),
             "access_keys": keys,
-            "live_rooms": rooms.rooms,
-            "live_peers": rooms.peers,
+            "live_rooms": canvas.map(|c| c.rooms.rooms),
+            "live_peers": canvas.map(|c| c.rooms.peers),
         },
         "public_url": state.cfg.public_url,
         "tls": { "mode": state.cfg.tls.mode.to_string(), "fingerprint": fingerprint },
@@ -837,14 +850,28 @@ struct UserRow {
     last_seen_at: Option<OffsetDateTime>,
     disabled: bool,
     device_count: i64,
-    canvas_count: i64,
+    /// Canvases on the linked Canvas Cloud this user belongs to; `null` when unlinked or
+    /// Canvas Cloud is unreachable.
+    #[sqlx(skip)]
+    canvas_count: Option<i64>,
+}
+
+/// Fill `canvas_count` from the linked Canvas Cloud (left `null` when unavailable).
+async fn with_canvas_counts(link: &CanvasLink, rows: &mut [UserRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    if let Some(counts) = link_admin::canvas_counts(link).await {
+        for row in rows {
+            row.canvas_count = Some(counts.get(&row.id).copied().unwrap_or(0));
+        }
+    }
 }
 
 const USER_VIEW_SQL: &str = "
 SELECT u.id, u.email, u.display_name, u.created_at, u.disabled,
        (SELECT max(d.last_seen_at) FROM devices d WHERE d.user_id = u.id) AS last_seen_at,
-       (SELECT count(*) FROM devices d WHERE d.user_id = u.id) AS device_count,
-       (SELECT count(*) FROM canvas_members m WHERE m.user_id = u.id) AS canvas_count
+       (SELECT count(*) FROM devices d WHERE d.user_id = u.id) AS device_count
 FROM users u
 WHERE ($1::uuid IS NULL OR u.id = $1)
   AND ($2::text IS NULL OR u.email ILIKE $2 OR u.display_name ILIKE $2)";
@@ -860,12 +887,13 @@ async fn user_by_id(db: &sqlx::PgPool, id: Uuid) -> ApiResult<UserRow> {
 
 async fn list_users(
     State(state): State<SharedState>,
+    Extension(link): Extension<CanvasLink>,
     _s: AdminSession,
     QueryParams(q): QueryParams<ListQuery>,
 ) -> ApiResult<Json<ListResponse<UserRow>>> {
     let (limit, offset) = q.page();
     let pattern = empty_to_none(q.q.as_deref()).map(like_pattern);
-    let items = sqlx::query_as::<_, UserRow>(&format!(
+    let mut items = sqlx::query_as::<_, UserRow>(&format!(
         "{USER_VIEW_SQL} ORDER BY u.created_at DESC, u.id DESC LIMIT $3 OFFSET $4"
     ))
     .bind(None::<Uuid>)
@@ -881,6 +909,7 @@ async fn list_users(
     .bind(&pattern)
     .fetch_one(&state.db)
     .await?;
+    with_canvas_counts(&link, &mut items).await;
     Ok(Json(ListResponse {
         items,
         total,
@@ -897,6 +926,7 @@ struct UserPatch {
 
 async fn update_user(
     State(state): State<SharedState>,
+    Extension(link): Extension<CanvasLink>,
     s: AdminSession,
     Path(raw): Path<String>,
     JsonBody(req): JsonBody<UserPatch, BODY_LIMIT>,
@@ -949,15 +979,19 @@ async fn update_user(
         Some(Value::Object(detail)),
     )
     .await?;
+    // Mirror the change to the linked Canvas Cloud (and close a disabled user's canvas
+    // sockets there); queued in this transaction so it survives Canvas Cloud being down.
+    provision::enqueue_user_changed(&mut tx, id, req.disabled == Some(true)).await?;
     tx.commit().await?;
-    if req.disabled == Some(true) {
-        copper_cloud_canvas::admin::disconnect_user(id);
-    }
-    Ok(Json(user_by_id(&state.db, id).await?))
+    link.kick_outbox();
+    let mut row = user_by_id(&state.db, id).await?;
+    with_canvas_counts(&link, std::slice::from_mut(&mut row)).await;
+    Ok(Json(row))
 }
 
 async fn delete_user(
     State(state): State<SharedState>,
+    Extension(link): Extension<CanvasLink>,
     s: AdminSession,
     Path(raw): Path<String>,
 ) -> ApiResult<Json<Value>> {
@@ -965,11 +999,11 @@ async fn delete_user(
     let email = auth::user_email(&state.db, id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let owned = copper_cloud_canvas::admin::owned_canvases(&state, id).await?;
     let mut tx = state.db.begin().await?;
     // Credentials and invites addressed to this person; everything keyed by user_id
-    // (sessions, devices, sync docs, history, pairing codes, owned canvases with their
-    // members/invites/updates, memberships) goes with the user row (FK cascade).
+    // (sessions, devices, sync docs, history, pairing codes, legacy canvas rows,
+    // memberships) goes with the user row (FK cascade). Their canvases on the linked Canvas
+    // Cloud are deleted there through the outbox below.
     sqlx::query("DELETE FROM access_keys WHERE lower(email) = lower($1)")
         .bind(&email)
         .execute(&mut *tx)
@@ -994,9 +1028,9 @@ async fn delete_user(
         Some(json!({ "email": email })),
     )
     .await?;
+    provision::enqueue_user_deleted(&mut tx, id).await?;
     tx.commit().await?;
-    copper_cloud_canvas::admin::canvases_deleted(&state, &owned);
-    copper_cloud_canvas::admin::disconnect_user(id);
+    link.kick_outbox();
     Ok(ok())
 }
 
@@ -1135,65 +1169,43 @@ async fn delete_device(
 // ---------------------------------------------------------------------------------------------
 // Canvases
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
-struct CanvasRow {
-    id: Uuid,
-    name: String,
-    kind: String,
-    owner_id: Uuid,
-    owner_email: String,
-    member_count: i64,
-    share_link_count: i64,
-    #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    updated_at: OffsetDateTime,
-}
+// The canvases live on the linked Canvas Cloud (`/v1/apps/self/canvases`); the list keeps
+// its shape (`items` of {id, name, kind, owner_id, owner_email, member_count,
+// share_link_count, created_at, updated_at}, `total`, `limit`, `offset`) plus `linked`.
+// Unlinked: an empty list with `linked: false`; Canvas Cloud down: `502 canvas_upstream`.
 
 async fn list_canvases(
-    State(state): State<SharedState>,
+    Extension(link): Extension<CanvasLink>,
     _s: AdminSession,
     QueryParams(q): QueryParams<ListQuery>,
-) -> ApiResult<Json<ListResponse<CanvasRow>>> {
+) -> Result<Json<Value>, LinkError> {
     let (limit, offset) = q.page();
     let kind = empty_to_none(q.kind.as_deref());
     if kind.is_some_and(|k| !matches!(k, "personal" | "shared")) {
-        return Err(ApiError::bad_request("kind must be personal or shared"));
+        return Err(ApiError::bad_request("kind must be personal or shared").into());
     }
-    let items = sqlx::query_as::<_, CanvasRow>(
-        "SELECT c.id, c.name, c.kind, c.owner_id, u.email AS owner_email,
-                (SELECT count(*) FROM canvas_members m WHERE m.canvas_id = c.id) AS member_count,
-                (SELECT count(*) FROM canvas_share_links l WHERE l.canvas_id = c.id) AS share_link_count,
-                c.created_at, c.updated_at
-         FROM canvases c JOIN users u ON u.id = c.owner_id
-         WHERE ($1::text IS NULL OR c.kind = $1)
-         ORDER BY c.created_at DESC, c.id DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(kind)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await?;
-    let total: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM canvases WHERE ($1::text IS NULL OR kind = $1)")
-            .bind(kind)
-            .fetch_one(&state.db)
-            .await?;
-    Ok(Json(ListResponse {
-        items,
-        total,
-        limit,
-        offset,
-    }))
+    let (items, total, linked) = match link_admin::list_canvases(&link, kind, limit, offset).await?
+    {
+        Some((items, total)) => (items, total, true),
+        None => (Vec::new(), 0, false),
+    };
+    Ok(Json(json!({
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "linked": linked,
+    })))
 }
 
 async fn delete_canvas(
     State(state): State<SharedState>,
+    Extension(link): Extension<CanvasLink>,
     s: AdminSession,
     Path(raw): Path<String>,
-) -> ApiResult<Json<Value>> {
+) -> Result<Json<Value>, LinkError> {
     let id = parse_id(&raw)?;
-    let name = copper_cloud_canvas::admin::delete_canvas(&state, id)
+    let name = link_admin::delete_canvas(&link, id)
         .await?
         .ok_or(ApiError::NotFound)?;
     audit(
@@ -1205,6 +1217,80 @@ async fn delete_canvas(
     )
     .await?;
     Ok(ok())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Canvas Cloud link
+
+fn link_actor(s: &AdminSession) -> Actor {
+    Actor::Admin {
+        id: s.admin_id,
+        email: s.email.clone(),
+    }
+}
+
+async fn get_canvas_link(
+    Extension(link): Extension<CanvasLink>,
+    _s: AdminSession,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(link_admin::view(&link).await?))
+}
+
+#[derive(Deserialize)]
+struct CanvasLinkPut {
+    url: String,
+    app_key: String,
+    tls_fingerprint: Option<String>,
+}
+
+async fn put_canvas_link(
+    Extension(link): Extension<CanvasLink>,
+    s: AdminSession,
+    JsonBody(req): JsonBody<CanvasLinkPut, BODY_LIMIT>,
+) -> ApiResult<Json<Value>> {
+    let app_key = zeroize::Zeroizing::new(req.app_key);
+    link_admin::set(
+        &link,
+        &link_actor(&s),
+        &req.url,
+        &app_key,
+        req.tls_fingerprint.as_deref(),
+    )
+    .await?;
+    // Provision every user now (the reconcile loop also runs on the link change).
+    let bg = link.clone();
+    tokio::spawn(async move {
+        if let Ok(Some(active)) = bg.enabled().await {
+            match provision::sync_all(&bg, &active).await {
+                Ok(r) => tracing::info!(
+                    provisioned = r.provisioned,
+                    total = r.total,
+                    failed = r.failed.len(),
+                    "canvas users provisioned"
+                ),
+                Err(err) => tracing::warn!(
+                    error = format!("{err:#}"),
+                    "canvas user provisioning failed"
+                ),
+            }
+        }
+    });
+    Ok(Json(link_admin::view(&link).await?))
+}
+
+async fn delete_canvas_link(
+    Extension(link): Extension<CanvasLink>,
+    s: AdminSession,
+) -> ApiResult<Json<Value>> {
+    link_admin::remove(&link, &link_actor(&s)).await?;
+    Ok(ok())
+}
+
+async fn test_canvas_link(
+    Extension(link): Extension<CanvasLink>,
+    s: AdminSession,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(link_admin::test(&link, &link_actor(&s)).await?))
 }
 
 // ---------------------------------------------------------------------------------------------
