@@ -653,9 +653,13 @@ async fn info_lists_features() {
         .json()
         .await
         .unwrap();
-    assert_eq!(
-        info["features"],
-        json!(["history_delete", "sso", "agent_pairing"])
+    // Other features join the list over time (it only grows); this suite owns its own entry.
+    assert!(
+        info["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("history_delete")),
+        "{info}"
     );
     assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
 }

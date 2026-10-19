@@ -72,6 +72,8 @@ pub struct Limits {
     pub max_history_entry_bytes: usize,
     /// Requests per minute per client IP on `/v1/auth/*`.
     pub auth_per_minute: u32,
+    /// Max size of one uploaded addon zip (`POST /admin/api/addons`, `copper-cloud addons upload`).
+    pub max_addon_bytes: usize,
 }
 
 impl Default for Limits {
@@ -81,6 +83,7 @@ impl Default for Limits {
             max_history_batch: 2000,
             max_history_entry_bytes: 16 * 1024,
             auth_per_minute: 10,
+            max_addon_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -208,6 +211,7 @@ struct RawLimits {
     max_history_batch: Option<usize>,
     max_history_entry_bytes: Option<usize>,
     auth_per_minute: Option<u32>,
+    max_addon_bytes: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -242,6 +246,7 @@ const ENV_KEYS: &[(&str, Kind)] = &[
     ("limits.max_history_batch", Kind::Int),
     ("limits.max_history_entry_bytes", Kind::Int),
     ("limits.auth_per_minute", Kind::Int),
+    ("limits.max_addon_bytes", Kind::Int),
 ];
 
 /// Environment variable name for a dotted config key: `tls.mode` → `COPPER_CLOUD_TLS__MODE`.
@@ -446,6 +451,10 @@ impl Config {
                 .limits
                 .auth_per_minute
                 .unwrap_or(defaults.auth_per_minute),
+            max_addon_bytes: raw
+                .limits
+                .max_addon_bytes
+                .unwrap_or(defaults.max_addon_bytes),
         };
         if limits.max_blob_bytes < 1024 || limits.max_blob_bytes > 256 * 1024 * 1024 {
             bail!("`limits.max_blob_bytes` must be between 1 KiB and 256 MiB");
@@ -458,6 +467,9 @@ impl Config {
         }
         if limits.auth_per_minute == 0 {
             bail!("`limits.auth_per_minute` must be at least 1");
+        }
+        if limits.max_addon_bytes < 1024 || limits.max_addon_bytes > 256 * 1024 * 1024 {
+            bail!("`limits.max_addon_bytes` must be between 1 KiB and 256 MiB");
         }
 
         let metrics_bind = match raw.metrics_bind.as_deref().map(str::trim) {
@@ -680,6 +692,7 @@ pub fn generate_toml(opts: &GenerateOptions) -> anyhow::Result<String> {
     out.push_str("acme_cache_dir = \"/var/lib/copper-cloud/acme\"\n\n");
     out.push_str("[limits]\nmax_blob_bytes = 8000000\nmax_history_batch = 2000\n");
     out.push_str("max_history_entry_bytes = 16384\nauth_per_minute = 10\n");
+    out.push_str("max_addon_bytes = 16777216\n");
     // Round-trip check so we never write a file we cannot load.
     Config::from_toml_str(&out, &|_| None).context("generated config failed validation")?;
     Ok(out)
@@ -719,6 +732,7 @@ mod tests {
         assert_eq!(c.tls.mode, TlsMode::SelfSigned);
         assert_eq!(c.limits.max_blob_bytes, 8_000_000);
         assert_eq!(c.limits.max_history_batch, 2000);
+        assert_eq!(c.limits.max_addon_bytes, 16 * 1024 * 1024);
         assert!(c.allow_signup);
         assert_eq!(c.metrics_bind, Some(DEFAULT_METRICS_BIND.parse().unwrap()));
         assert_eq!(c.log_format, LogFormat::Json);
@@ -734,6 +748,7 @@ mod tests {
                 ("COPPER_CLOUD_TLS__MODE", "acme"),
                 ("COPPER_CLOUD_TLS__DOMAIN", "Cloud.Example.org."),
                 ("COPPER_CLOUD_LIMITS__MAX_BLOB_BYTES", "4_000_000"),
+                ("COPPER_CLOUD_LIMITS__MAX_ADDON_BYTES", "1048576"),
                 ("COPPER_CLOUD_METRICS_BIND", "off"),
                 ("COPPER_CLOUD_LOG_FORMAT", "pretty"),
                 // Unknown COPPER_CLOUD_* vars (e.g. installer inputs) are ignored.
@@ -746,6 +761,7 @@ mod tests {
         assert_eq!(c.tls.mode, TlsMode::Acme);
         assert_eq!(c.tls.domain.as_deref(), Some("cloud.example.org"));
         assert_eq!(c.limits.max_blob_bytes, 4_000_000);
+        assert_eq!(c.limits.max_addon_bytes, 1_048_576);
         assert_eq!(c.metrics_bind, None);
         assert_eq!(c.log_format, LogFormat::Pretty);
     }
@@ -779,6 +795,11 @@ mod tests {
         assert!(bad_key.is_err());
         let bad_master = Config::from_toml_str(BASE, &env(&[("COPPER_CLOUD_MASTER_KEY", "AAAA")]));
         assert!(bad_master.is_err());
+        let bad_addon_cap = Config::from_toml_str(
+            BASE,
+            &env(&[("COPPER_CLOUD_LIMITS__MAX_ADDON_BYTES", "10")]),
+        );
+        assert!(bad_addon_cap.is_err());
         let unknown = Config::from_toml_str(&format!("{BASE}\nnope = 1\n"), &env(&[]));
         assert!(
             unknown.is_err(),

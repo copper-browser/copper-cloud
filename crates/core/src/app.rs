@@ -38,6 +38,8 @@ pub const FEATURES: &[&str] = &[
     "sso",
     // `POST /v1/agents/pair` + device-bound pairing codes (0.9.0).
     "agent_pairing",
+    // `GET /v1/addons` + `GET /v1/addons/{id}/bundle/{sha256}` (0.10.0).
+    "addons",
 ];
 
 /// Core `/v1` routes (auth, pairing, devices, sync, intelligence, info). Paths are relative to `/v1`.
@@ -50,6 +52,7 @@ pub fn router() -> Router<SharedState> {
         .merge(crate::agents::routes())
         .merge(crate::sync::routes())
         .merge(crate::intelligence::routes())
+        .merge(crate::addons::routes())
 }
 
 /// The complete HTTP app for the canvas/core test suites: `/healthz` + `/v1/*` (core routes

@@ -5,6 +5,7 @@
 //! a per-person access key, see [`access`]).
 
 pub mod access;
+pub mod addons;
 pub mod agents;
 pub mod app;
 pub mod auth;

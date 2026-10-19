@@ -74,6 +74,10 @@ pub enum Command {
     /// org-wide agent tool-call round budget.
     #[command(subcommand)]
     Intelligence(IntelligenceCommand),
+    /// Addons: web bundles that replace a slot of the Copper window (e.g. the agent sidebar),
+    /// uploaded here and handed to everyone or to listed people.
+    #[command(subcommand)]
+    Addons(crate::admin_addons_cli::AddonsCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -288,6 +292,9 @@ pub enum AdminCommand {
     Integration(IntegrationCommand),
     /// Name shown on the /start onboarding page ("" resets to "Copper Cloud").
     SetInstanceName { name: String },
+    /// Addons (same as `copper-cloud addons …`).
+    #[command(subcommand)]
+    Addons(crate::admin_addons_cli::AddonsCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -548,6 +555,11 @@ pub fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Intelligence(cmd) => {
             let cfg = load_config(cli.config)?;
             runtime()?.block_on(crate::admin::intelligence(cfg, cmd))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Addons(cmd) => {
+            let cfg = load_config(cli.config)?;
+            runtime()?.block_on(crate::admin_addons_cli::run(cfg, cmd))?;
             Ok(ExitCode::SUCCESS)
         }
     }

@@ -233,6 +233,31 @@ calls Copper's agent pane runs for one question, for everyone. It is not a key: 
 `GET /v1/intelligence` even when sharing is off or no keys are set, and a plain `clear` keeps it.
 Blank/cleared = each person's own Copper setting (default 60).
 
+### Addons
+
+Addons are web bundles that replace a slot of the Copper window (today the agent sidebar,
+⌘E / Ctrl+E); see [addons.md](addons.md). Portal: **Addons**. Shell:
+
+```sh
+sudo copper-cloud addons slots
+sudo copper-cloud addons upload notes-sidebar.copperaddon --slot agent-sidebar   # new ids start OFF
+sudo copper-cloud addons enable com.example.notes-sidebar --people ana@example.com,bob@example.com
+sudo copper-cloud addons enable com.example.notes-sidebar --everyone [--priority 10]
+sudo copper-cloud addons settings com.example.notes-sidebar --json '{"apiUrl":"https://api.example.com"}'
+sudo copper-cloud addons settings com.example.notes-sidebar --file settings.json   # or "-" = stdin
+sudo copper-cloud addons list [--json]
+sudo copper-cloud addons disable com.example.notes-sidebar
+sudo copper-cloud addons delete com.example.notes-sidebar --yes
+```
+
+(`copper-cloud admin addons …` is the same command.) Uploading a new version of an existing id
+makes it current; re-uploading a stored version with different contents is refused (bump
+`version` in its `manifest.json`). Portal changes reach connected Coppers at once (SSE
+`addons`); CLI changes at their next check (launch / update check). Every change is audited
+(`addon.*`; settings values are never logged, only their keys). Upload size:
+`limits.max_addon_bytes` (default 16 MiB). Bundles live in Postgres (`addon_versions`), so the
+regular database backup covers them.
+
 ### Access mode and access keys
 
 ```sh

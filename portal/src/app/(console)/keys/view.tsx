@@ -652,6 +652,14 @@ function KeyCreatedDialog({
               onCopied={() => setCopied(true)}
               hint="Only needed to connect by host and key instead of the link code."
             />
+            {shown.link_code.includes("#") && (
+              <SecretWell
+                label="Download link"
+                value={`${window.location.origin}/download/#${shown.link_code.split("#")[1]}`}
+                onCopied={() => setCopied(true)}
+                hint="For someone without Copper: a page to install it, then connect with this key."
+              />
+            )}
           </div>
         )}
 

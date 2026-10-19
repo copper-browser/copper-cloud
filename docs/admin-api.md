@@ -67,6 +67,9 @@ Always `{"error": "<code>", "message": "<human text>"}`:
 | 403 | `csrf` | missing `X-Requested-With: copper-cloud-portal` |
 | 404 | `not_found` | unknown id or unknown `/admin/api/...` route |
 | 413 | `payload_too_large` | body over 16 KiB |
+| 409 | `version_exists` | addon upload: that version is stored with other contents ([Addons](#addons)) |
+| 413 | `payload_too_large` | addon upload over `limits.max_addon_bytes` (default 16 MiB) |
+| 415 | `unsupported_media_type` | addon upload not sent as `application/zip` |
 | 429 | `rate_limited` | `login` rate limit (`Retry-After: 60`) |
 | 500 | `internal` | server bug / database failure |
 
@@ -655,6 +658,133 @@ Revokes an unused code. `{ "ok": true }`; unknown/used → `404`.
 
 ---
 
+## Addons
+
+Web bundles that replace a slot of the Copper window (concepts, manifest, bundle format,
+resolution: [addons.md](addons.md)). An addon is identified by its manifest `id` (e.g.
+`com.example.notes-sidebar`); an id that is not a valid addon id is a 404. Every change bumps
+the addon's `revision`, writes an `addon.*` audit row and sends the SSE `addons` event to
+every connected Copper. **Not paginated:** `GET addons` returns a plain array (an instance
+has a handful of addons).
+
+### `GET /admin/api/addons/slots`
+
+```json
+[{ "id": "agent-sidebar", "name": "Agent sidebar",
+   "description": "The pane on the right of the page, toggled by ⌘E (Mac) or Ctrl+E (Linux, Windows). Replaces the built-in agent pane." }]
+```
+
+### `GET /admin/api/addons`
+
+Every addon, by slot, then in resolution order (highest `priority`, then most recently
+changed): an array of addon rows.
+
+```json
+[
+  {
+    "id": "com.example.notes-sidebar",
+    "slot": "agent-sidebar",
+    "name": "Notes sidebar",
+    "enabled": true,
+    "audience": "people",
+    "people": [
+      { "id": "0192f1c4-…", "email": "ana@example.com", "name": "Ana" },
+      { "id": null, "email": "new.hire@example.com", "name": null }
+    ],
+    "settings": { "apiUrl": "https://api.example.com" },
+    "priority": 0,
+    "revision": 4,
+    "current": { "version": "1.1.0", "sha256": "<hex>", "size": 48213,
+                 "uploaded_at": "2026-10-19T18:04:05Z", "uploaded_by": "admin@example.com",
+                 "current": true },
+    "versions": [
+      { "version": "1.1.0", "sha256": "<hex>", "size": 48213, "uploaded_at": "…", "uploaded_by": "admin@example.com", "current": true },
+      { "version": "1.0.0", "sha256": "<hex>", "size": 47990, "uploaded_at": "…", "uploaded_by": null, "current": false }
+    ],
+    "manifest": { "schema": "copper-addon/1", "id": "com.example.notes-sidebar", "…": "…" },
+    "created_at": "2026-10-19T17:00:00Z",
+    "updated_at": "2026-10-19T18:04:05Z",
+    "updated_by": "admin@example.com"
+  }
+]
+```
+
+- `people`: the audience emails (lower-cased), each with the user's `id` and display `name`
+  once someone with that email has an account (`null` before). Kept when `audience` is
+  `everyone`, but only used for `people`.
+- `settings`: the admin's values only; the manifest's `settings[*].default` fill the rest when
+  served. Build the settings form from `manifest.settings`.
+- `versions`: newest first; `size` = served bundle bytes; `uploaded_by` = admin email, `null`
+  for the server CLI or a deleted admin. `manifest` is the current version's.
+- `updated_by`: admin email or `"cli"`.
+
+### `GET /admin/api/addons/{id}`
+
+One addon row (same shape). 404 if unknown.
+
+### `POST /admin/api/addons?slot=<slot>` — upload
+
+Body: the `.copperaddon` zip itself (not JSON, not multipart), `Content-Type:
+application/zip` (`application/x-zip-compressed` and `application/octet-stream` are accepted
+too; anything else → `415 unsupported_media_type`). At most `limits.max_addon_bytes`
+(default 16 MiB) → `413`. `?slot=` is required and must equal the manifest's `slot` (the slot
+the admin picked) → else `400`.
+
+```ts
+await fetch(`/admin/api/addons?slot=${slot}`, {
+  method: 'POST', credentials: 'same-origin', body: file,
+  headers: { 'X-Requested-With': 'copper-cloud-portal', 'Content-Type': 'application/zip' },
+});
+```
+
+Answers the addon row plus `"upload"`:
+
+| Status | `upload` | |
+|---|---|---|
+| 201 | `"created"` | new id: stored **off**, audience `people` with nobody |
+| 200 | `"new_version"` | new version of an existing addon, now current |
+| 200 | `"unchanged"` | that version is already stored with the same bytes |
+| 409 | — | `{"error":"version_exists","message","id","version","sha256"}`: same version, other bytes (bump `version`) |
+| 400 | — | `bad_request` with a message naming the problem: `manifest.json: …` (schema, id, version, slot, entry, permissions, settings, platforms) or `bundle: …` (not a zip, no manifest, unsafe path, symlink, missing entry, too many files, too large unzipped, zip bomb) |
+
+### `PATCH /admin/api/addons/{id}`
+
+Any subset (unknown fields → 400; an empty body → 400):
+
+```json
+{
+  "enabled": true,
+  "audience": "people",
+  "people": ["ana@example.com", "new.hire@example.com"],
+  "settings": { "apiUrl": "https://api.example.com", "pageSize": null },
+  "priority": 10,
+  "current_version": "1.0.0"
+}
+```
+
+- `audience`: `"everyone"` | `"people"`. `people` **replaces** the list (emails, validated,
+  lower-cased, de-duplicated, ≤ 5000); people without an account yet get the addon when they
+  sign up with that email.
+- `settings` **replaces** the admin's values: keys must be declared in the (new) current
+  version's manifest and values must have the declared `type` (else 400); `null` drops a key
+  (back to its default). ≤ 16 KiB.
+- `priority`: −1000…1000 (higher wins within a slot).
+- `current_version`: make a stored version current (roll back / forward); unknown → 400.
+
+Answers the updated addon row.
+
+### `DELETE /admin/api/addons/{id}`
+
+Deletes the addon, every version and its audience → `{"ok": true}`. 404 if unknown. Coppers
+remove it at their next check.
+
+### `GET /admin/api/addons/{id}/versions/{version}/bundle`
+
+The stored served bundle (`application/json`, `copper-addon-bundle/1`) for inspection. 404
+if unknown.
+
+---
+
 ## Audit log
 
 ### `GET /admin/api/audit?limit=&offset=`
@@ -701,6 +831,10 @@ object or `null`. Actions:
 | `sso.user_create` / `sso.link` | user id | `{provider, email}`: an account created / linked by a first SSO sign-in (`admin_id: null`) |
 | `integration.create` / `.rotate` / `.revoke` | integration id | `{name, domains, create_users, via}` / `{name, via}` / `{name, revoked_sessions, revoked_gate_keys, via}` |
 | `agent.pair` | device id | `{integration_id, integration, user_id, email, device_name, created_user, revoked_sessions, revoked_gate_keys}` (`admin_id: null`) |
+| `addon.create` | addon id | `{slot, name, version, sha256, size, files, via}` (first upload of an id) |
+| `addon.upload` | addon id | same as `addon.create` (a new version, now current) |
+| `addon.update` | addon id | the changed fields: `enabled`, `audience`, `priority`, `current_version`, `settings` (the keys only, never values), `people` (count) + `emails` (when ≤ 50); and `via` |
+| `addon.delete` | addon id | `{slot, name, versions, via}` |
 
 `intelligence.*`, `sso.*` and `integration.*` rows written by the server CLI, and rows written by
 a user's read, an SSO sign-in or an agent pairing, have `admin_id: null` (`detail.via = "cli"`
