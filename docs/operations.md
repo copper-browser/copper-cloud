@@ -253,6 +253,58 @@ sudo copper-cloud admin create-access-key --label "Ada" [--email ada@example.com
   the instance key until it is re-linked with an access key (or paired from a signed-in
   Copper, which hands it a personal key automatically).
 
+### Single sign-on and agent integrations
+
+```sh
+sudo copper-cloud admin sso show                    # providers, password sign-in, join link, /start URL
+printf '%s\n' "$SECRET" | sudo copper-cloud admin sso set-google --client-id … \
+    --client-secret-stdin --domain example.com
+sudo copper-cloud admin sso disable [--id google]   # keep the config, stop offering it
+sudo copper-cloud admin sso password-signin off     # SSO only for people (admins unaffected)
+sudo copper-cloud link-code --sso                   # the join link (stdout); /start URL on stderr
+sudo copper-cloud admin integration create --name Bots --domain example.com   # key printed once
+sudo copper-cloud admin integration list|rotate ID|revoke ID
+```
+
+`doctor` lists each provider (enabled, secret stored, domains), the `/start` URL and join link,
+and the number of active integrations and agent devices. Details: [sso.md](sso.md).
+
+### Adding a domain to an existing self-signed instance
+
+An instance that started self-signed on a bare IP has every Copper pinned to that
+certificate's fingerprint. Switching straight to ACME would break all of them. **Hybrid TLS**
+adds a domain with a Let's Encrypt certificate and keeps serving the pinned certificate to the
+old links:
+
+```toml
+public_url = "203.0.113.10"     # unchanged: legacy link codes and pairing links keep using it
+[tls]
+mode = "acme"
+domain = "cloud.example.com"    # DNS A record → this host
+acme_email = "ops@example.com"
+fallback_self_signed = true     # keep serving cert_path/key_path to IP / no-SNI clients
+# cert_path / key_path: unchanged — the existing self-signed files (never regenerated)
+```
+
+1. Point the domain's DNS at the host. Port 443 must be reachable (TLS-ALPN-01).
+2. Back up `/etc/copper-cloud/tls/`. Add the settings above (or `COPPER_CLOUD_TLS__MODE=acme`,
+   `COPPER_CLOUD_TLS__DOMAIN=…`, `COPPER_CLOUD_TLS__FALLBACK_SELF_SIGNED=true`), then restart.
+3. Check that `copper-cloud link-code` is **unchanged** (same IP, same `fp=`), and that
+   `copper-cloud doctor` shows `hybrid: link-code/pairing keep 203.0.113.10:443 + fp; SSO,
+   /start and agent links use cloud.example.com:443 without fp`.
+4. `curl https://cloud.example.com/healthz` works once the first certificate is issued.
+   Until then the domain gets the self-signed certificate.
+
+What each client sees:
+
+| Client connects to | Certificate | Links that point there |
+|---|---|---|
+| `cloud.example.com` (SNI = the domain) | Let's Encrypt (WebPKI) | SSO join link, `/start`, agent-pairing links (no `fp`); `GET /admin/api/sso` → `join_link`, `start_url` |
+| `203.0.113.10` (no SNI) or any other name | the existing self-signed certificate | `link-code`, access-key and pairing links (`fp=` as before) |
+
+Turning `fallback_self_signed` off later makes it a plain ACME instance. Do that only once
+every Copper has re-linked to the domain.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -260,6 +312,8 @@ sudo copper-cloud admin create-access-key --label "Ada" [--email ada@example.com
 | Copper says the certificate does not match | `copper-cloud link-code` and re-link; was `tls-init --force` run or the VM rebuilt without `tls/`? |
 | every request is 401 `instance_key` | the client's key differs from `instance_key` (env `COPPER_CLOUD_INSTANCE_KEY` overrides the file); in `directory` mode the instance key is refused — give the person an access key; or their access key was revoked / expired (portal › Access keys) |
 | signup 403 `access_key_email` / `access_key_exhausted` | the access key is bound to another email / has created `max_uses` accounts already: mint a new key |
+| signup/login 403 `password_signin_disabled` | password sign-in is off (`admin sso password-signin on` to allow it again) |
+| SSO sign-in fails | `admin sso show`, the portal's **Test** button, and [sso.md › Troubleshooting](sso.md#troubleshooting) |
 | `/` says "portal not built" | the binary was built without `portal/out` (`cd portal && bun install && bun run build`, then rebuild); use a release build |
 | locked out of the portal | `sudo copper-cloud admin reset-admin-password --email …` (`list-admins` shows the emails) |
 | 429 on login | 10 auth requests/min/IP; behind a proxy set `trust_proxy = true` |

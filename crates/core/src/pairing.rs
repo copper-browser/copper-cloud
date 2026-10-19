@@ -12,6 +12,10 @@
 //!   the new Copper sends in `X-Copper-Instance` from now on: the instance key in `open`
 //!   mode, a freshly minted access key (label `"<device name> via pairing"`, email = the
 //!   user's) in `directory` mode.
+//! * A code minted by `POST /v1/agents/pair` (see [`crate::agents`]) is bound to one device
+//!   (`pairing_codes.device_id`): redeeming it signs in that device id, whatever the body says.
+//!
+//! [`sign_in_device`] (device + session + gate key) is shared with single sign-on.
 
 use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
@@ -28,7 +32,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::extract::{JsonBody, OptionalJsonBody};
 use crate::ids;
 use crate::link::LinkCode;
-use crate::state::SharedState;
+use crate::state::{AppState, SharedState};
 
 /// Prefix of every pairing code.
 pub const PAIRING_PREFIX: &str = "cp_";
@@ -192,11 +196,54 @@ struct PairRequest {
     device: Option<DeviceInput>,
 }
 
+/// What a newly signed-in Copper gets from pairing and SSO: the session plus the credential
+/// to send in `X-Copper-Instance` from now on.
 #[derive(Serialize)]
-struct PairResponse {
+pub(crate) struct DeviceSignIn {
     #[serde(flatten)]
-    session: SessionResponse,
-    gate_key: String,
+    pub session: SessionResponse,
+    pub gate_key: String,
+}
+
+/// Sign `device` in to `user` (inside `tx`): upsert the device, start a session and pick the
+/// gate key — the instance key in `open` mode, a fresh access key labelled
+/// `"<device name> via <via>"` (email = the user's, bound to the device) in `directory` mode.
+pub(crate) async fn sign_in_device(
+    state: &AppState,
+    tx: &mut sqlx::PgConnection,
+    user: UserView,
+    device: DeviceInput,
+    via: &str,
+) -> ApiResult<DeviceSignIn> {
+    let device = auth::upsert_device(tx, user.id, Some(device)).await?;
+    let token = auth::create_session(tx, user.id, device.id).await?;
+    let gate_key = match access::access_mode(state).await? {
+        AccessMode::Open => state.cfg.instance_key.clone(),
+        AccessMode::Directory => {
+            let label = format!("{} via {via}", device.name);
+            let (key_id, key) = access::mint_access_key(
+                tx,
+                &NewAccessKey {
+                    label: &label,
+                    email: Some(&user.email),
+                    created_by_user: Some(user.id),
+                    device_id: Some(device.id),
+                    ..NewAccessKey::default()
+                },
+            )
+            .await?;
+            tracing::info!(user_id = %user.id, access_key_id = %key_id, via, "access key minted for a new device");
+            key
+        }
+    };
+    Ok(DeviceSignIn {
+        session: SessionResponse {
+            token,
+            user,
+            device,
+        },
+        gate_key,
+    })
 }
 
 fn bad_code() -> ApiError {
@@ -206,31 +253,32 @@ fn bad_code() -> ApiError {
 async fn pair(
     State(state): State<SharedState>,
     JsonBody(req): JsonBody<PairRequest, BODY_LIMIT>,
-) -> ApiResult<Json<PairResponse>> {
+) -> ApiResult<Json<DeviceSignIn>> {
     let code = req.code.trim();
     if !plausible_pairing_code(code) {
         return Err(bad_code());
     }
     let digest = ids::sha256(code.as_bytes());
     let mut device = req.device.unwrap_or_default();
-    let device_id = device.id.unwrap_or_else(ids::uuid_v7);
-    device.id = Some(device_id);
+    let requested_id = device.id.unwrap_or_else(ids::uuid_v7);
 
     let mut tx = state.db.begin().await?;
-    // Single use: only one transaction can flip used_at from NULL.
-    let claimed: Option<(Uuid, Uuid, Option<String>)> = sqlx::query_as(
-        "UPDATE pairing_codes SET used_at = now(), used_by_device = $2
+    // Single use: only one transaction can flip used_at from NULL. A bound code (agent
+    // pairing) signs in its own device id, whatever the request asked for.
+    let claimed: Option<(Uuid, Uuid, Option<String>, Uuid, bool)> = sqlx::query_as(
+        "UPDATE pairing_codes SET used_at = now(), used_by_device = COALESCE(device_id, $2)
          WHERE code_sha256 = $1 AND used_at IS NULL AND expires_at > now()
-         RETURNING id, user_id, device_name",
+         RETURNING id, user_id, device_name, used_by_device, device_id IS NOT NULL",
     )
     .bind(&digest[..])
-    .bind(device_id)
+    .bind(requested_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((pairing_id, user_id, code_device_name)) = claimed else {
+    let Some((pairing_id, user_id, code_device_name, device_id, bound)) = claimed else {
         tracing::info!("pairing failed: unknown, used or expired code");
         return Err(bad_code());
     };
+    device.id = Some(device_id);
     let user: Option<(UserView, bool)> =
         sqlx::query_as::<_, (Uuid, String, String, OffsetDateTime, bool)>(
             "SELECT id, email, display_name, created_at, disabled FROM users WHERE id = $1",
@@ -255,40 +303,16 @@ async fn pair(
     if disabled {
         return Err(ApiError::Unauthorized("account_disabled"));
     }
-    if auth::clean_name(device.name.as_deref(), 200).is_none() {
-        device.name = code_device_name;
+    // A bound code names its device; otherwise the code's name is only a fallback.
+    if bound || auth::clean_name(device.name.as_deref(), 200).is_none() {
+        device.name = code_device_name.or(device.name);
     }
-    let device = auth::upsert_device(&mut tx, user.id, Some(device)).await?;
-    let token = auth::create_session(&mut tx, user.id, device.id).await?;
-    let gate_key = match access::access_mode(&state).await? {
-        AccessMode::Open => state.cfg.instance_key.clone(),
-        AccessMode::Directory => {
-            let label = format!("{} via pairing", device.name);
-            let (key_id, key) = access::mint_access_key(
-                &mut tx,
-                &NewAccessKey {
-                    label: &label,
-                    email: Some(&user.email),
-                    created_by_user: Some(user.id),
-                    ..NewAccessKey::default()
-                },
-            )
-            .await?;
-            tracing::info!(user_id = %user.id, access_key_id = %key_id, "access key minted by pairing");
-            key
-        }
-    };
+    let user_id = user.id;
+    let signed_in = sign_in_device(&state, &mut tx, user, device, "pairing").await?;
     tx.commit().await?;
-    tracing::Span::current().record("user_id", tracing::field::display(user.id));
-    tracing::info!(user_id = %user.id, device_id = %device.id, %pairing_id, "paired");
-    Ok(Json(PairResponse {
-        session: SessionResponse {
-            token,
-            user,
-            device,
-        },
-        gate_key,
-    }))
+    tracing::Span::current().record("user_id", tracing::field::display(user_id));
+    tracing::info!(user_id = %user_id, device_id = %device_id, %pairing_id, bound, "paired");
+    Ok(Json(signed_in))
 }
 
 #[cfg(test)]

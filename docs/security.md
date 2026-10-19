@@ -7,7 +7,8 @@ data. Goals:
 
 1. Strangers on the internet cannot use the API at all (gate credential: instance key or a
    personal access key), nor read traffic (TLS). In `directory` mode the admin decides, per
-   person, who may connect.
+   person, who may connect. With single sign-on the admin decides per email domain instead:
+   whoever the company's identity provider vouches for gets in.
 2. Users of the same instance cannot see each other's data (every query is user-scoped).
 3. A stolen database dump / disk snapshot without the master key reveals no synced content.
 4. No secrets in logs.
@@ -49,7 +50,8 @@ transaction; instance key → `allow_signup`; directory mode without a key → `
 
 A signed-in Copper can mint a single-use code (`cp_` + 24 random bytes base64url, SHA-256
 stored, 10-minute TTL, ≤ 20 active per user) that signs another Copper into the same account.
-`POST /v1/auth/pair` is the only gate-free `/v1` route: the code is the credential. It is rate
+`POST /v1/auth/pair` is gate-free (like the SSO routes and `POST /v1/agents/pair`): the code
+is the credential. It is rate
 limited with `/v1/auth/*`, looked up by hash (an indexed equality on a 256-bit digest — no
 timing oracle on the code), and consumed with `UPDATE … WHERE used_at IS NULL AND expires_at >
 now() RETURNING` inside the transaction that creates the session, so two concurrent redemptions
@@ -57,6 +59,9 @@ cannot both succeed. The response carries the gate credential the new device mus
 instance key in `open` mode, or — in `directory` mode — a fresh access key bound to the user's
 email (label `"<device> via pairing"`), so every paired device is individually revocable.
 Codes are revocable by their owner and by admins; used/expired rows are purged after a day.
+A code minted by agent pairing is bound to one device id (`pairing_codes.device_id`):
+redemption signs in that device, so a code stolen from the agent's side cannot sign in some
+other device id.
 
 ### Admin accounts and the admin API
 
@@ -96,6 +101,11 @@ proxy (and should be paired with `trust_proxy = true`).
   `tls-init --force` rotates it and every Copper must then re-link with the new code.
 - **acme**: a publicly trusted Let's Encrypt certificate; the link code has no `fp` and
   clients use normal WebPKI validation.
+- **acme + `fallback_self_signed`** (hybrid): the ACME certificate for clients that ask for
+  `tls.domain` by SNI; the existing self-signed certificate (never regenerated) for everyone
+  else (IP literal, no SNI), so Coppers pinned to it keep working. Link codes and pairing
+  links keep the pinned `public_url` + `fp`. SSO join links, `/start` and agent-pairing links
+  use the domain without `fp`.
 
 rustls only (ring provider), TLS 1.2+ with rustls' safe defaults; HTTP/2 or HTTP/1.1 via ALPN.
 
@@ -234,13 +244,52 @@ The installer's local Postgres listens on localhost only; the `copper_cloud` rol
 40-character password and `scram-sha-256` auth on `127.0.0.1`/`::1` only. For RDS use
 `?sslmode=require` (or stricter) in `DATABASE_URL`.
 
-## Google SSO (TODO)
+## Single sign-on
 
-Not implemented in v1; email + password only. Plan: optional OIDC "Sign in with Google"
-(`[auth.google] client_id`, `client_secret`, allowed hosted domain) using the authorization
-code + PKCE flow from Copper, the server verifying the ID token (issuer, audience, `hd`,
-`email_verified`), linking by verified email and issuing the same opaque session tokens.
-Password login stays available for self-hosters without a Google project.
+See [sso.md](sso.md) for setup. What the server trusts and why:
+
+- **The gate is the identity provider's domain check.** The ungated routes are
+  `GET /v1/auth/sso` (public metadata: client id, endpoints, domains) and
+  `POST /v1/auth/sso/{id}`. A sign-in succeeds only with a one-time authorization code the
+  provider issued to this client id, plus the matching PKCE verifier. The join link and `/start`
+  carry no secret. Anyone can start a sign-in, but only a verified account in an allowed domain
+  finishes it. With Google, the Workspace `hd` claim must also be an allowed domain, so a
+  personal Google account registered with a company address is refused. Use an *Internal*
+  consent screen so Google itself only admits your organization.
+- **Code exchange on the server.** The client secret is stored AES-256-GCM-sealed under a
+  per-provider data key wrapped by the KEK (AAD `sso:<id>`), like the intelligence keys. It is
+  never returned by the admin API (`has_secret` only), never logged and not in the audit
+  detail. It is read from stdin on the CLI. Codes and tokens are never logged.
+- **ID token.** It is fetched directly from the provider's token endpoint over TLS
+  (`https://`; webpki roots; no redirects; 10 s timeouts). The server checks `iss`,
+  `aud`/`azp`, `exp` (60 s skew), `sub`, `email_verified` and the domain. Its signature is not
+  verified: the TLS channel to the token endpoint authenticates it (OpenID Connect Core, "ID
+  Token Validation"). OIDC discovery documents must match the configured issuer exactly.
+- **Redirect URIs** are loopback only (`127.0.0.1`, `[::1]`, `localhost` with a port). A
+  code stolen in transit cannot be redeemed without the verifier.
+- **Account linking by email** trusts the provider's `email_verified`. An existing password
+  account with the same address is linked on first SSO sign-in, so allow only domains your
+  provider is authoritative for.
+- **Rate limits.** `POST /v1/auth/sso/{id}` shares the per-IP auth limiter. Failed OIDC
+  discovery is cached for a minute, so the public `GET /v1/auth/sso` cannot be turned into a
+  request flood against the issuer.
+- **Password sign-in can be turned off** (`password_signin`), leaving SSO as the only way in
+  for people. Admin accounts are separate and unaffected. SSO-only accounts have no password
+  hash, and password login for them does the same dummy Argon2 work as for an unknown email
+  before answering `sso_only`.
+
+## Agent integrations
+
+An agent-integration key (`cai_` + 256 random bits, stored as SHA-256, shown once) lets a
+service mint a **device-bound, single-use, 10-minute pairing code** for any user in the
+integration's domains (`POST /v1/agents/pair`). With `create_users`, the service can also
+create those accounts. **That is admin-level power over those domains**: hand the key only to
+services trusted like an admin, narrow its domains, turn `create_users` off where possible, and
+rotate/revoke it from the portal or the CLI. Revocation also signs out every agent device the
+integration paired: their sessions are deleted and their gate keys revoked. Re-pairing a device
+replaces its previous session and gate key, so a leaked session for an agent device dies at
+the next pairing. Every pairing and every key change is audited. The route is not rate
+limited, because the key is unguessable, and it is checked by shape before any database lookup.
 
 ## Reporting
 

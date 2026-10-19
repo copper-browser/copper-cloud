@@ -14,7 +14,11 @@ use uuid::Uuid;
 
 use copper_cloud_core::intelligence;
 
-use crate::cli::{AdminCommand, HistoryCommand, HistoryDeleteArgs, IntelligenceCommand};
+use crate::cli::{
+    AdminCommand, HistoryCommand, HistoryDeleteArgs, IntegrationCommand, IntelligenceCommand,
+    SsoCommand,
+};
+use copper_cloud_core::{agents, sso};
 
 pub async fn run(cfg: Config, cmd: AdminCommand) -> anyhow::Result<()> {
     let pool = db::connect(&cfg).await?;
@@ -84,7 +88,7 @@ async fn dispatch(cfg: &Config, pool: &sqlx::PgPool, cmd: AdminCommand) -> anyho
             let hash = auth::hash_password(password).await.map_err(api)?;
             let crypto = Crypto::from_master_key(&cfg.master_key);
             let mut conn = pool.acquire().await?;
-            let user = auth::insert_user(&mut conn, &crypto, &email, &display_name, &hash)
+            let user = auth::insert_user(&mut conn, &crypto, &email, &display_name, Some(&hash))
                 .await
                 .map_err(api)?;
             println!("created user {} ({})", user.email, user.id);
@@ -254,6 +258,14 @@ async fn dispatch(cfg: &Config, pool: &sqlx::PgPool, cmd: AdminCommand) -> anyho
                 Ok(code) => println!("{}", code.with_key(&key)),
                 Err(err) => eprintln!("(no link code: {err:#})"),
             }
+        }
+        AdminCommand::Sso(cmd) => sso_command(cfg, pool, cmd).await?,
+        AdminCommand::Integration(cmd) => integration_command(pool, cmd).await?,
+        AdminCommand::SetInstanceName { name } => {
+            let name = sso::set_instance_name(pool, Some(&name))
+                .await
+                .map_err(api)?;
+            println!("instance name: {name}");
         }
         AdminCommand::History(HistoryCommand::Delete(args)) => {
             // Counts only: never print history content.
@@ -492,4 +504,239 @@ pub async fn intelligence(cfg: Config, cmd: IntelligenceCommand) -> anyhow::Resu
     .await;
     pool.close().await;
     result
+}
+
+/// The first line of stdin, for `--client-secret-stdin` (never argv).
+fn read_secret_line(what: &str) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    if std::io::stdin().is_terminal() {
+        eprint!("{what}: ");
+    }
+    let mut line = zeroize::Zeroizing::new(String::new());
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .with_context(|| format!("reading the {what} from stdin"))?;
+    let secret = zeroize::Zeroizing::new(line.trim().to_owned());
+    if secret.is_empty() {
+        bail!("empty {what} on stdin");
+    }
+    Ok(secret)
+}
+
+/// `copper-cloud link-code --sso`: the join link on stdout, the /start URL on stderr.
+pub async fn sso_link_code(cfg: &Config) -> anyhow::Result<()> {
+    let pool = db::connect(cfg).await?;
+    let provider = sso::primary_provider(&pool).await.map_err(api);
+    pool.close().await;
+    let Some(provider) = provider? else {
+        bail!("single sign-on is not set up — run `copper-cloud admin sso set-google …` first (docs/sso.md)");
+    };
+    println!("{}", sso::join_link(cfg, &provider.id));
+    eprintln!(
+        "share {} (install steps + this link); provider: {}",
+        sso::start_url(cfg),
+        provider.id
+    );
+    Ok(())
+}
+
+async fn print_sso(cfg: &Config, pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    let providers = sso::list_providers(pool).await.map_err(api)?;
+    let password = sso::password_signin(pool).await.map_err(api)?;
+    println!(
+        "password sign-in: {}",
+        if password {
+            "on"
+        } else {
+            "off (single sign-on only; admins unaffected)"
+        }
+    );
+    if providers.is_empty() {
+        println!("providers:        none (copper-cloud admin sso set-google …)");
+        return Ok(());
+    }
+    for p in &providers {
+        let secret = match (p.has_secret, p.kind) {
+            (true, _) => "stored",
+            (false, sso::ProviderKind::Oidc) => "none (public client)",
+            (false, sso::ProviderKind::Google) => "MISSING",
+        };
+        println!();
+        println!("provider:    {} ({})", p.id, p.kind.as_str());
+        println!("  name:        {}", p.name);
+        println!(
+            "  status:      {}",
+            if p.enabled { "enabled" } else { "disabled" }
+        );
+        println!("  client id:   {}", p.client_id);
+        println!("  secret:      {secret}");
+        if let Some(issuer) = &p.issuer {
+            println!("  issuer:      {issuer}");
+        }
+        println!("  domains:     {}", p.domains.join(", "));
+        println!(
+            "  new users:   {}",
+            if p.auto_create {
+                "created on first sign-in"
+            } else {
+                "existing accounts only"
+            }
+        );
+        println!(
+            "  updated:     {} by {}",
+            fmt_time(p.updated_at),
+            p.updated_by.as_deref().unwrap_or("-")
+        );
+    }
+    if let Some(p) = providers.iter().find(|p| p.usable()) {
+        println!();
+        println!("join link:   {}", sso::join_link(cfg, &p.id));
+        println!("share:       {}", sso::start_url(cfg));
+    }
+    Ok(())
+}
+
+async fn sso_command(cfg: &Config, pool: &sqlx::PgPool, cmd: SsoCommand) -> anyhow::Result<()> {
+    let actor = intelligence::Actor::Cli;
+    let crypto = Crypto::from_master_key(&cfg.master_key);
+    match cmd {
+        SsoCommand::Show => {}
+        SsoCommand::SetGoogle {
+            client_id,
+            client_secret_stdin,
+            domains,
+            no_auto_create,
+        } => {
+            let secret = client_secret_stdin
+                .then(|| read_secret_line("client secret"))
+                .transpose()?;
+            let input = sso::ProviderInput {
+                kind: sso::ProviderKind::Google,
+                name: None,
+                client_id,
+                client_secret: secret.as_deref().cloned(),
+                issuer: None,
+                domains,
+                auto_create: Some(!no_auto_create),
+                enabled: Some(true),
+            };
+            sso::put_provider(pool, cfg, &crypto, &actor, "google", input)
+                .await
+                .map_err(api)?;
+            eprintln!("saved provider google");
+        }
+        SsoCommand::SetOidc {
+            id,
+            issuer,
+            client_id,
+            client_secret_stdin,
+            name,
+            domains,
+            no_auto_create,
+        } => {
+            let secret = client_secret_stdin
+                .then(|| read_secret_line("client secret"))
+                .transpose()?;
+            let input = sso::ProviderInput {
+                kind: sso::ProviderKind::Oidc,
+                name,
+                client_id,
+                client_secret: secret.as_deref().cloned(),
+                issuer: Some(issuer),
+                domains,
+                auto_create: Some(!no_auto_create),
+                enabled: Some(true),
+            };
+            sso::put_provider(pool, cfg, &crypto, &actor, &id, input)
+                .await
+                .map_err(api)?;
+            eprintln!("saved provider {id}");
+        }
+        SsoCommand::Disable { id } => {
+            let n = sso::set_providers_enabled(pool, &actor, id.as_deref(), false)
+                .await
+                .map_err(api)?;
+            eprintln!("disabled {n} provider(s)");
+        }
+        SsoCommand::Enable { id } => {
+            let n = sso::set_providers_enabled(pool, &actor, id.as_deref(), true)
+                .await
+                .map_err(api)?;
+            eprintln!("enabled {n} provider(s)");
+        }
+        SsoCommand::Delete { id } => {
+            if !sso::delete_provider(pool, &actor, &id).await.map_err(api)? {
+                bail!("no provider {id}");
+            }
+            eprintln!("deleted provider {id}");
+        }
+        SsoCommand::PasswordSignin { state } => {
+            sso::set_password_signin(pool, &actor, state == "on")
+                .await
+                .map_err(api)?;
+        }
+    }
+    print_sso(cfg, pool).await
+}
+
+async fn integration_command(pool: &sqlx::PgPool, cmd: IntegrationCommand) -> anyhow::Result<()> {
+    let actor = intelligence::Actor::Cli;
+    match cmd {
+        IntegrationCommand::Create {
+            name,
+            domains,
+            no_create_users,
+        } => {
+            let (view, key) =
+                agents::create_integration(pool, &actor, &name, &domains, !no_create_users)
+                    .await
+                    .map_err(api)?;
+            eprintln!(
+                "integration {} ({}) — the key below is shown once; store it as a secret:",
+                view.id, view.name
+            );
+            println!("{key}");
+        }
+        IntegrationCommand::List => {
+            let list = agents::list_integrations(pool).await.map_err(api)?;
+            println!(
+                "{:<36} {:<24} {:<8} {:>7}  {:<20} DOMAINS",
+                "ID", "NAME", "STATUS", "DEVICES", "LAST USED"
+            );
+            for i in &list {
+                println!(
+                    "{:<36} {:<24} {:<8} {:>7}  {:<20} {}",
+                    i.id,
+                    i.name,
+                    if i.revoked_at.is_some() {
+                        "revoked"
+                    } else {
+                        "active"
+                    },
+                    i.device_count,
+                    i.last_used_at.map_or_else(|| "-".to_owned(), fmt_time),
+                    if i.domains.is_empty() {
+                        "(single sign-on domains)".to_owned()
+                    } else {
+                        i.domains.join(",")
+                    }
+                );
+            }
+            println!("{} integration(s)", list.len());
+        }
+        IntegrationCommand::Rotate { id } => {
+            let key = agents::rotate_integration(pool, &actor, id)
+                .await
+                .map_err(api)?;
+            eprintln!("integration {id}: new key (shown once; the old key no longer works):");
+            println!("{key}");
+        }
+        IntegrationCommand::Revoke { id } => {
+            agents::revoke_integration(pool, &actor, id)
+                .await
+                .map_err(api)?;
+            println!("revoked integration {id} (its agent devices are signed out)");
+        }
+    }
+    Ok(())
 }

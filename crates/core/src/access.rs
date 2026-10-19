@@ -272,6 +272,8 @@ pub struct NewAccessKey<'a> {
     pub max_uses: Option<i32>,
     pub created_by_admin: Option<Uuid>,
     pub created_by_user: Option<Uuid>,
+    /// The device the key was minted for (pairing / SSO), so re-pairing it can revoke it.
+    pub device_id: Option<Uuid>,
 }
 
 pub const MAX_LABEL_CHARS: usize = 200;
@@ -304,10 +306,11 @@ pub async fn mint_access_key(
     let id = ids::uuid_v7();
     sqlx::query(
         "INSERT INTO access_keys
-             (id, key_sha256, label, email, created_by_admin, created_by_user, expires_at, max_uses)
+             (id, key_sha256, label, email, created_by_admin, created_by_user, expires_at, max_uses,
+              device_id)
          VALUES ($1, $2, $3, $4, $5, $6,
                  CASE WHEN $7::int IS NULL THEN NULL ELSE now() + make_interval(days => $7) END,
-                 $8)",
+                 $8, $9)",
     )
     .bind(id)
     .bind(&digest[..])
@@ -317,6 +320,7 @@ pub async fn mint_access_key(
     .bind(new.created_by_user)
     .bind(new.expires_in_days)
     .bind(new.max_uses)
+    .bind(new.device_id)
     .execute(conn)
     .await?;
     Ok((id, key))

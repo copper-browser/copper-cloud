@@ -13,6 +13,8 @@ export type AuditIcon =
   | "canvas"
   | "pairing"
   | "ai"
+  | "sso"
+  | "agent"
   | "other";
 
 export interface AuditLine {
@@ -131,6 +133,89 @@ export function describeAudit(entry: AuditEntry, self: boolean): AuditLine {
     case "pairing_code.revoke":
       return { icon: "pairing", verb: "revoked a pairing code" };
     default:
-      return { icon: "other", verb: entry.action.replace(/[._]/g, " ") };
+      return (
+        describeAccess(entry.action, d, entry.target) ?? {
+          icon: "other",
+          verb: entry.action.replace(/[._]/g, " "),
+        }
+      );
   }
+}
+
+const PAST: Record<string, string> = {
+  create: "created",
+  update: "updated",
+  set: "updated",
+  put: "updated",
+  delete: "removed",
+  remove: "removed",
+  revoke: "revoked",
+  rotate: "rotated the key for",
+  test: "tested",
+  enable: "turned on",
+  disable: "turned off",
+};
+
+/**
+ * Single sign-on (`sso.*`) and agent access (`integration.*`, `agent.*`) rows
+ * (copper-cloud ≥ 0.9.0), phrased from the last segment so new actions still read.
+ */
+function describeAccess(
+  action: string,
+  d: Record<string, unknown>,
+  target: string | null | undefined,
+): AuditLine | undefined {
+  const parts = action.split(".");
+  const area = parts[0];
+  const verb = PAST[parts[parts.length - 1] ?? ""];
+  const via = d.via === "cli" ? "The server CLI" : undefined;
+
+  if (area === "sso") {
+    if (typeof d.password_signin === "boolean") {
+      return {
+        icon: "sso",
+        verb: d.password_signin
+          ? "turned password sign-in on"
+          : "turned password sign-in off",
+        actor: via,
+      };
+    }
+    // A person's own first sign-in: no admin involved.
+    if (parts[1] === "user_create" || parts[1] === "link") {
+      return {
+        icon: "sso",
+        verb: parts[1] === "user_create" ? "joined with" : "linked their account to",
+        object: str(d.provider) ?? "single sign-on",
+        actor: str(d.email) ?? "A person",
+      };
+    }
+    const list = Array.isArray(d.providers)
+      ? d.providers.filter((p): p is string => typeof p === "string").join(", ")
+      : undefined;
+    const name =
+      str(d.name) ??
+      str(d.provider) ??
+      (list || undefined) ??
+      (parts[1] === "provider" ? (target ?? undefined) : undefined);
+    if (!verb) return { icon: "sso", verb: "changed single sign-on", actor: via };
+    if (!name) return { icon: "sso", verb: `${verb} single sign-on`, actor: via };
+    return { icon: "sso", verb: `${verb} sign-in with`, object: name, actor: via };
+  }
+  if (area === "integration" || area === "agent_integration") {
+    return {
+      icon: "agent",
+      verb: `${verb ?? "changed"} integration`,
+      object: str(d.name),
+      actor: via,
+    };
+  }
+  if (area === "agent" && parts[1] === "pair") {
+    return {
+      icon: "agent",
+      verb: "paired a Copper for",
+      object: str(d.email) ?? "a person",
+      actor: str(d.integration) ?? str(d.integration_name) ?? "An integration",
+    };
+  }
+  return undefined;
 }

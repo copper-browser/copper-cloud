@@ -653,7 +653,10 @@ async fn info_lists_features() {
         .json()
         .await
         .unwrap();
-    assert_eq!(info["features"], json!(["history_delete"]));
+    assert_eq!(
+        info["features"],
+        json!(["history_delete", "sso", "agent_pairing"])
+    );
     assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
 }
 

@@ -51,6 +51,31 @@ impl LinkCode {
         }
         out
     }
+
+    /// Single sign-on join link (no secret: the provider's domain check is the gate):
+    /// `copper-cloud://HOST:PORT/#sso=<provider id>&fp=<fp>` (`fp` as in the link code).
+    pub fn sso_link(&self, provider_id: &str) -> String {
+        let mut out = format!("{}#sso={provider_id}", self.base());
+        if let Some(fp) = &self.fingerprint {
+            out.push_str("&fp=");
+            out.push_str(fp);
+        }
+        out
+    }
+
+    /// `https://HOST[:PORT]<path>` for a browser (`:443` omitted, IPv6 bracketed).
+    pub fn https_url(&self, path: &str) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        if self.port == 443 {
+            format!("https://{host}{path}")
+        } else {
+            format!("https://{host}:{}{path}", self.port)
+        }
+    }
 }
 
 impl fmt::Display for LinkCode {
@@ -185,6 +210,33 @@ mod tests {
         let with = code.with_key(&ak);
         assert_eq!(with.to_string().parse::<LinkCode>().unwrap(), with);
         assert!(with.to_string().contains(&format!("#k={ak}&fp=")));
+    }
+
+    #[test]
+    fn sso_links_and_urls() {
+        let mut code = LinkCode {
+            host: "203.0.113.10".into(),
+            port: 443,
+            instance_key: KEY.into(),
+            fingerprint: Some("c".repeat(64)),
+        };
+        assert_eq!(
+            code.sso_link("google"),
+            format!(
+                "copper-cloud://203.0.113.10:443/#sso=google&fp={}",
+                "c".repeat(64)
+            )
+        );
+        assert_eq!(code.https_url("/start"), "https://203.0.113.10/start");
+        code.fingerprint = None;
+        code.host = "copper.example.com".into();
+        assert_eq!(
+            code.sso_link("google"),
+            "copper-cloud://copper.example.com:443/#sso=google"
+        );
+        code.host = "::1".into();
+        code.port = 8443;
+        assert_eq!(code.https_url("/start"), "https://[::1]:8443/start");
     }
 
     #[test]

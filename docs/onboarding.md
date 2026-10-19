@@ -15,9 +15,23 @@ this page fills in what it leaves to "your administrator".
 | Instance | Any host you run: the VM one-liner ([install.md](install.md)) or [deploy/aws](../deploy/aws/README.md). Examples below use `cloud.example.com`. |
 | Certificate | Self-signed by default — Copper pins it through the `fp=` in each link code; a web browser opening the admin portal warns once. With `COPPER_CLOUD_DOMAIN=…` you get a Let's Encrypt certificate instead. |
 | Access mode | `directory` (recommended): everyone gets a personal access key. `open`: one shared link code. |
+| Single sign-on | Recommended: Google Workspace or any OpenID Connect provider ([sso.md](sso.md)). Then onboarding is one link — `https://cloud.example.com/start` — with no keys or passwords to hand out. |
 | Model keys | Optional. Set a Jev key and/or an LLM router key (with **your** gateway's URL) once and every signed-in Copper receives them ([operations.md](operations.md#intelligence-ai-keys)). |
 
-## For a new user
+## For a new user (single sign-on)
+
+Open the `https://cloud.example.com/start` link your administrator shared:
+
+1. **Install Copper** (the page shows the Mac download / Homebrew command and the Linux
+   one-liner).
+2. **Open in Copper**. If nothing happens, copy the join link from the page and paste it into
+   Copper › Settings › Cloud.
+3. **Continue with Google** (or your company's provider) and pick your company account. You're
+   in: there's no account to create and no password. Pick what syncs and press **Turn on sync**.
+
+A second Mac does the same three steps (or pairs from the first, below).
+
+## For a new user (link code)
 
 1. **Install Copper** and move in from your previous browser (see Copper's guide).
 2. **Get a link code** from your administrator for the email you want on the account.
@@ -29,6 +43,22 @@ this page fills in what it leaves to "your administrator".
    code**; paste it on the new Mac and press **Pair this Mac**. Don't reuse a one-use link code.
 
 ## For the administrator
+
+### Share the onboarding page (single sign-on)
+
+Set up single sign-on once ([sso.md](sso.md)), for example with Google:
+
+```sh
+printf '%s\n' 'GOCSPX-…' | sudo copper-cloud admin sso set-google \
+  --client-id 123-abc.apps.googleusercontent.com --client-secret-stdin --domain example.com
+sudo copper-cloud admin set-instance-name "Example Inc"   # heading of /start
+sudo copper-cloud admin sso show                           # prints the /start URL
+```
+
+Then share `https://cloud.example.com/start` wherever your team looks: the wiki, the
+onboarding checklist, a pinned message. It holds no secret. Only people with a verified account
+in your domain(s) get in; everyone else gets "use your @example.com account". To make SSO the
+only way in, run `copper-cloud admin sso password-signin off` (admins are unaffected).
 
 ### Issue a link code
 
@@ -67,4 +97,6 @@ that `copper-cloud link-code` is unchanged and `copper-cloud doctor` is clean. D
 | "The server's certificate doesn't match the link code's fingerprint" | The instance's certificate changed. Ask your administrator for a new link code. |
 | "The instance refused this key" | The key was revoked or expired, or a one-use code was reused. Pair from a signed-in Mac, or ask for a new code. |
 | Sign-up refused for your email | The key is bound to another address. Use the email the key was issued for, or ask for a new key. |
+| "Use your @example.com account" | You picked a personal (or other company's) account in the sign-in window. Sign in again and choose your work account. |
+| "This account signs in with single sign-on" | The account was created by SSO and has no password: use **Continue with Google** instead of the password form. |
 | The agent says no model is set up | Check Settings › Cloud shows you signed in, then Settings › Intelligence › **Test**. The instance may not share model keys. |

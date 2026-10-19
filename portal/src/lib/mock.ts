@@ -13,11 +13,16 @@ import type {
   Canvas,
   CreatedAccessKey,
   Device,
+  Integration,
+  IntegrationDevice,
   IntelligenceSettings,
   Overview,
   Page,
   PairingCode,
   Settings,
+  SsoProvider,
+  SsoSettings,
+  SsoTestCheck,
   User,
 } from "./types";
 
@@ -369,6 +374,105 @@ const intelligence: IntelligenceSettings = {
   defaults: INTEL_DEFAULTS,
 };
 const last4 = (k: string) => (k.length < 12 ? "" : k.slice(-4));
+
+// Single sign-on + agent access (0.9.0). SSO starts unconfigured so the
+// walkthrough shows; a client secret containing "wrong" fails the test.
+interface SsoRow extends Omit<SsoProvider, "has_secret"> {
+  secret: string | null;
+}
+const sso: { password_signin: boolean; providers: SsoRow[] } = {
+  password_signin: true,
+  providers: [],
+};
+const GOOGLE_SUFFIX = ".apps.googleusercontent.com";
+
+interface IntegrationRow extends Omit<Integration, "device_count"> {
+  devices: IntegrationDevice[];
+}
+const agentDevice = (email: string, name: string, n: number, seen: number | null) => ({
+  user_email: email,
+  device_id: `7d3f0c1e-9a2b-5c4d-8e6f-${n.toString(16).padStart(12, "0")}`,
+  name,
+  last_seen_at: seen === null ? null : ago(seen),
+});
+let integrations: IntegrationRow[] = [
+  {
+    id: fid("f1", 1),
+    name: "Team bots",
+    domains: [],
+    create_users: true,
+    created_at: ago(6 * DAY),
+    last_used_at: ago(22 * MIN),
+    revoked_at: null,
+    devices: [
+      agentDevice("ana@hollis.studio", "Bot · Vera", 1, 22 * MIN),
+      agentDevice("marcus@hollis.studio", "Bot · Atlas", 2, 3 * HOUR),
+      agentDevice("priya@hollis.studio", "Bot · Juniper", 3, 2 * DAY),
+    ],
+  },
+  {
+    id: fid("f1", 2),
+    name: "Staging bots (old)",
+    domains: ["hollis.studio"],
+    create_users: false,
+    created_at: ago(30 * DAY),
+    last_used_at: ago(12 * DAY),
+    revoked_at: ago(9 * DAY),
+    devices: [agentDevice("tomas@hollis.studio", "Bot · Test", 4, 12 * DAY)],
+  },
+];
+const toIntegration = ({ devices: d, ...row }: IntegrationRow): Integration => ({
+  ...row,
+  device_count: d.length,
+});
+
+function ssoView(): SsoSettings {
+  const first = sso.providers.find((p) => p.enabled);
+  return {
+    enabled: !!first,
+    password_signin: sso.password_signin,
+    providers: sso.providers.map(({ secret, ...p }) => ({ ...p, has_secret: !!secret })),
+    join_link: first ? `copper-cloud://${HOST}/#sso=${first.id}&fp=${FINGERPRINT}` : null,
+    start_url: first ? `https://${HOST.replace(/:443$/, "")}/start` : null,
+  };
+}
+
+function ssoTest(p: SsoRow): SsoTestCheck[] {
+  const checks: SsoTestCheck[] = [];
+  if (p.kind === "oidc") {
+    const ok = /^https:\/\/[^\s/]+/.test(p.issuer ?? "");
+    checks.push({
+      name: "Discovery",
+      ok,
+      detail: ok
+        ? `Read ${p.issuer}/.well-known/openid-configuration.`
+        : "The issuer URL isn't https.",
+    });
+  } else {
+    const ok = p.client_id.endsWith(GOOGLE_SUFFIX);
+    checks.push({
+      name: "Client ID format",
+      ok,
+      detail: ok
+        ? "Looks like a Google OAuth client ID."
+        : `Doesn't end in ${GOOGLE_SUFFIX}.`,
+    });
+  }
+  const wrong = !p.secret || p.secret.includes("wrong");
+  checks.push({
+    name: "Token endpoint",
+    ok: !wrong,
+    detail: wrong
+      ? "The provider answered invalid_client: the OAuth client was not found or the secret doesn't match."
+      : "The provider answered invalid_grant for a dummy code, so the ID and secret are accepted.",
+  });
+  checks.push({
+    name: "Allowed domains",
+    ok: p.domains.length > 0,
+    detail: p.domains.length ? p.domains.join(", ") : "No domains: nobody can sign in.",
+  });
+  return checks;
+}
 
 let auditSeq = 0;
 const audit: AuditEntry[] = [];
@@ -852,6 +956,116 @@ function route(
       record("pairing_code.revoke", row.id, { user_id: row.user_id }, nowIso);
       return { ok: true };
     }
+  }
+
+  if (seg[0] === "sso") {
+    if (method === "GET" && seg.length === 1) return ssoView();
+    if (method === "PATCH" && seg.length === 1) {
+      if (typeof body.password_signin !== "boolean")
+        throw bad("password_signin is required");
+      sso.password_signin = body.password_signin;
+      record(
+        "sso.password_signin",
+        "sso",
+        { password_signin: sso.password_signin },
+        nowIso,
+      );
+      return ssoView();
+    }
+    if (seg[1] === "providers" && seg[2]) {
+      const pid = seg[2];
+      const row = sso.providers.find((p) => p.id === pid);
+      if (method === "PUT" && seg.length === 3) {
+        const kind = body.kind === "oidc" ? "oidc" : "google";
+        const clientId = String(body.client_id ?? "").trim();
+        if (!clientId) throw bad("client_id is required");
+        const domains = Array.isArray(body.domains) ? body.domains.map(String) : [];
+        if (!domains.length) throw bad("at least one domain is required");
+        const secret = body.client_secret
+          ? String(body.client_secret)
+          : (row?.secret ?? null);
+        if (!secret) throw bad("client_secret is required");
+        const issuer = kind === "oidc" ? String(body.issuer ?? "").trim() : null;
+        if (kind === "oidc" && !issuer) throw bad("issuer is required");
+        const next: SsoRow = {
+          id: pid,
+          kind,
+          name: String(body.name ?? "").trim() || (kind === "google" ? "Google" : pid),
+          client_id: clientId,
+          secret,
+          issuer,
+          domains,
+          auto_create: body.auto_create !== false,
+          enabled: body.enabled !== false,
+          updated_at: nowIso,
+        };
+        sso.providers = row
+          ? sso.providers.map((p) => (p.id === pid ? next : p))
+          : [...sso.providers, next];
+        record(
+          "sso.provider.put",
+          pid,
+          { kind, name: next.name, domains, enabled: next.enabled, via: "admin_api" },
+          nowIso,
+        );
+        return ssoView();
+      }
+      if (!row) throw notFound();
+      if (method === "DELETE" && seg.length === 3) {
+        sso.providers = sso.providers.filter((p) => p !== row);
+        record("sso.provider.delete", pid, { via: "admin_api" }, nowIso);
+        return { ok: true };
+      }
+      if (method === "POST" && seg[3] === "test") {
+        const checks = ssoTest(row);
+        return { ok: checks.every((c) => c.ok), checks };
+      }
+    }
+  }
+
+  if (seg[0] === "integrations") {
+    if (method === "GET" && seg.length === 1) {
+      return newestFirst(integrations).map(toIntegration);
+    }
+    if (method === "POST" && seg.length === 1) {
+      const name = String(body.name ?? "").trim();
+      if (!name || name.length > 200) throw bad("name must be 1-200 characters");
+      const row: IntegrationRow = {
+        id: crypto.randomUUID(),
+        name,
+        domains: Array.isArray(body.domains) ? body.domains.map(String) : [],
+        create_users: body.create_users === true,
+        created_at: nowIso,
+        last_used_at: null,
+        revoked_at: null,
+        devices: [],
+      };
+      integrations = [row, ...integrations];
+      record("integration.create", row.id, { name }, nowIso);
+      const key = `cai_${base64url(crypto.getRandomValues(new Uint8Array(32)))}`;
+      return { integration: toIntegration(row), key };
+    }
+    const row = integrations.find((i) => i.id === seg[1]);
+    if (!row) throw notFound();
+    if (method === "POST" && seg[2] === "rotate") {
+      if (row.revoked_at) throw bad("this integration is revoked; create a new one");
+      record("integration.rotate", row.id, { name: row.name }, nowIso);
+      return { key: `cai_${base64url(crypto.getRandomValues(new Uint8Array(32)))}` };
+    }
+    if (method === "DELETE" && seg.length === 2) {
+      if (!row.revoked_at) {
+        // Like the server: revoking signs out every Copper it paired (devices stay listed).
+        row.revoked_at = nowIso;
+        record(
+          "integration.revoke",
+          row.id,
+          { name: row.name, revoked_sessions: row.devices.length },
+          nowIso,
+        );
+      }
+      return toIntegration(row);
+    }
+    if (method === "GET" && seg[2] === "devices") return row.devices;
   }
 
   if (method === "GET" && path === "audit") return paginate(audit, params);
