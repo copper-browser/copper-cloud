@@ -273,12 +273,18 @@ pub(crate) fn is_ws_path(path: &str) -> bool {
         .is_some_and(|id| !id.is_empty() && !id.contains('/'))
 }
 
-/// The query string minus every `token=` parameter (Copper's session token for WebSocket
-/// tooling); `None` when nothing is left.
+/// The query string minus Copper's own credentials, which never go to Canvas Cloud: every
+/// `token=` (the session token, for WebSocket tooling and browsers) and `instance=` (the gate
+/// credential a browser's room socket carries, `copper_cloud_core::app::INSTANCE_QUERY`);
+/// `None` when nothing is left.
 pub(crate) fn forwarded_query(query: Option<&str>) -> Option<String> {
+    let ours = |kv: &str| {
+        let key = kv.split_once('=').map_or(kv, |(k, _)| k);
+        key == "token" || key == copper_cloud_core::app::INSTANCE_QUERY
+    };
     let kept: Vec<&str> = query?
         .split('&')
-        .filter(|kv| !kv.is_empty() && *kv != "token" && !kv.starts_with("token="))
+        .filter(|kv| !kv.is_empty() && !ours(kv))
         .collect();
     (!kept.is_empty()).then(|| kept.join("&"))
 }
@@ -301,6 +307,15 @@ mod tests {
             Some("tokens=1&x=%20")
         );
         assert_eq!(forwarded_query(Some("token&q=1")).as_deref(), Some("q=1"));
+        // A browser's room socket: neither the session nor the gate credential goes upstream.
+        assert_eq!(
+            forwarded_query(Some("token=t&instance=ck_x")).as_deref(),
+            None
+        );
+        assert_eq!(
+            forwarded_query(Some("instance=k&full=true&instances=2")).as_deref(),
+            Some("full=true&instances=2")
+        );
     }
 
     #[test]

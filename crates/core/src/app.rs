@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::{OriginalUri, Request, State};
-use axum::http::HeaderValue;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -25,6 +24,11 @@ pub const INSTANCE_HEADER: &str = "x-copper-instance";
 /// (rate limited by the auth limiter). The SSO routes ([`crate::sso::is_sso_path`]) and
 /// [`crate::agents::AGENT_PAIR_PATH`] are ungated too.
 pub const PAIR_PATH: &str = "/v1/auth/pair";
+
+/// Query parameter that may carry the gate credential on a canvas room socket
+/// (`/v1/canvases/{id}/ws`) instead of [`INSTANCE_HEADER`]: a browser cannot set headers on a
+/// WebSocket (Canvas App, `/canvas/`). Nowhere else; request logs never record query strings.
+pub const INSTANCE_QUERY: &str = "instance";
 
 /// The admin login route (rate limited with its own per-IP bucket).
 pub const ADMIN_LOGIN_PATH: &str = "/admin/api/login";
@@ -132,24 +136,42 @@ pub fn is_gated(path: &str) -> bool {
         && !crate::sso::is_sso_path(path)
 }
 
+/// Whether `path` is a canvas room socket, `/v1/canvases/{id}/ws`.
+pub fn is_canvas_socket(path: &str) -> bool {
+    path.strip_prefix("/v1/canvases/")
+        .and_then(|rest| rest.strip_suffix("/ws"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+/// The [`INSTANCE_QUERY`] value of a query string, percent-decoded.
+fn query_credential(query: Option<&str>) -> Option<String> {
+    form_urlencoded::parse(query?.as_bytes())
+        .find(|(k, _)| k == INSTANCE_QUERY)
+        .map(|(_, v)| v.into_owned())
+}
+
 /// Middleware: every gated path (see [`is_gated`]) must present a valid credential in
 /// `X-Copper-Instance` — the shared instance key (only while `access_mode = open`, compared
-/// in constant time) or a valid access key — else 401 `{"error":"instance_key"}`. The
-/// accepted credential is attached as a [`GateIdentity`] extension.
+/// in constant time) or a valid access key — else 401 `{"error":"instance_key"}`. A canvas
+/// room socket without the header may carry it as `?instance=` instead ([`INSTANCE_QUERY`]).
+/// The accepted credential is attached as a [`GateIdentity`] extension.
 pub async fn instance_gate(
     State(state): State<SharedState>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    if !is_gated(req.uri().path()) {
+    let path = req.uri().path();
+    if !is_gated(path) {
         return next.run(req).await;
     }
-    let presented = req
-        .headers()
-        .get(INSTANCE_HEADER)
-        .map(HeaderValue::as_bytes)
-        .unwrap_or_default();
-    match gate_identity(&state, presented).await {
+    let presented: Vec<u8> = match req.headers().get(INSTANCE_HEADER) {
+        Some(value) => value.as_bytes().to_vec(),
+        None if is_canvas_socket(path) => query_credential(req.uri().query())
+            .unwrap_or_default()
+            .into_bytes(),
+        None => Vec::new(),
+    };
+    match gate_identity(&state, &presented).await {
         Ok(Some(identity)) => {
             req.extensions_mut().insert(identity);
             next.run(req).await
@@ -288,6 +310,32 @@ mod tests {
         assert!(!instance_key_matches(b"abd", b"abc"));
         assert!(!instance_key_matches(b"", b""));
         assert!(!instance_key_matches(b"abcd", b"abc"));
+    }
+
+    #[test]
+    fn canvas_sockets() {
+        assert!(is_canvas_socket("/v1/canvases/0192aa/ws"));
+        assert!(is_canvas_socket("/v1/canvases/personal/ws"));
+        for p in [
+            "/v1/canvases/ws",
+            "/v1/canvases//ws",
+            "/v1/canvases/a/b/ws",
+            "/v1/canvases/a/state",
+            "/v1/canvases",
+            "/v1/sync/ws",
+        ] {
+            assert!(!is_canvas_socket(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn instance_from_query() {
+        assert_eq!(
+            query_credential(Some("token=t&instance=ck_a%2Bb")).as_deref(),
+            Some("ck_a+b")
+        );
+        assert_eq!(query_credential(Some("token=t")), None);
+        assert_eq!(query_credential(None), None);
     }
 
     #[test]

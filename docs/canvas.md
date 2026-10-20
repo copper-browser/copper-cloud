@@ -135,9 +135,30 @@ copper-cloud exports `canvas_link_ws_pipes` and `canvas_link_events_total`
 
 ## Web share-link landing page
 
-Still served by copper-cloud, unchanged: `GET /join/{token}` (no gate, no database, no
-Canvas Cloud call) hands off to `copper://canvas/join/{token}?cloud={host}`
-(`crates/canvas-link/src/landing.rs`).
+Still served by copper-cloud: `GET /join/{token}` (no gate, no database, no Canvas Cloud call)
+hands off to `copper://canvas/join/{token}?cloud={host}` (`crates/canvas-link/src/landing.rs`).
+Under the Copper button it links to `/canvas/#/join/{token}` for people who are not on Copper.
+
+## Canvas App (`/canvas/`)
+
+`GET /canvas/` serves [Canvas App](https://github.com/copper-browser/canvas-app): the canvas in
+any browser. It is one self-contained file, vendored as
+`crates/copper-cloud/assets/canvas-app.html`. `packaging/sync-canvas-app.sh [REF]` updates it;
+`--check` compares it. The route is ungated, like the landing page, and holds no data.
+
+The app reaches the linked Canvas Cloud through the same proxy Copper uses. It runs on the
+server's own origin, so its REST calls need no CORS, which copper-cloud never grants. To use it,
+a person pastes a link code (the gate credential, e.g. an access key from the portal) and signs
+in.
+
+Its room socket can't send headers, so it carries both credentials in the query,
+`?token=…&instance=…`. The gate accepts `instance` on `/v1/canvases/{id}/ws` only
+(`INSTANCE_QUERY`), request logs never record query strings, and neither parameter goes
+upstream.
+
+Headers: `Cache-Control: no-cache`, `nosniff`, `Referrer-Policy: no-referrer`, and CSP
+`frame-ancestors 'none'`; the rest of its policy is the page's own `<meta>` CSP. `/canvas`
+redirects (308) to `/canvas/`.
 
 ## Security model
 

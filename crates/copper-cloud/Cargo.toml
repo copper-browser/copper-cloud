@@ -48,6 +48,7 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+form_urlencoded.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 tokio-tungstenite.workspace = true

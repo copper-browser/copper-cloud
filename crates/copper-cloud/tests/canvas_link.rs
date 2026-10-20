@@ -622,6 +622,43 @@ async fn next_data(ws: &mut Ws) -> Message {
     }
 }
 
+/// Canvas App's room socket: a browser cannot set headers on a WebSocket, so the session
+/// and the gate credential both ride in the query.
+#[tokio::test]
+async fn browser_websocket_carries_the_gate_credential_in_the_query() {
+    let (s, _c, m, ana, _bob) = setup().await;
+    let key: String = form_urlencoded::byte_serialize(s.key().as_bytes()).collect();
+    let url = |q: &str| format!("ws://{}/v1/canvases/c1/ws?{q}", s.addr);
+
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(url(&format!("token={}&instance={key}", ana.token)))
+            .await
+            .expect("browser socket accepted");
+    // Neither the session nor the gate credential goes upstream.
+    let last = m.st.requests_for("/v1/canvases/c1/ws").pop().unwrap();
+    assert_eq!(last.query, None, "token= and instance= stripped");
+    assert_eq!(last.headers["x-canvas-user"], ana.user_id);
+    ws.send(Message::Binary(vec![1, 2, 3].into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_data(&mut ws).await,
+        Message::Binary(vec![1, 2, 3].into())
+    );
+    drop(ws);
+
+    // No credential, or a wrong one, is the gate's 401 as with a header.
+    for q in [
+        format!("token={}", ana.token),
+        format!("token={}&instance=ck_nope", ana.token),
+    ] {
+        let (status, body) =
+            http_error(tokio_tungstenite::connect_async(url(&q)).await.unwrap_err());
+        assert_eq!(status, 401, "{q}");
+        assert_eq!(body["error"], "instance_key");
+    }
+}
+
 #[tokio::test]
 async fn websocket_pipe() {
     let (s, _c, m, ana, _bob) = setup().await;
@@ -1107,4 +1144,9 @@ async fn join_landing_page_is_public() {
     assert_eq!(r.headers()["cache-control"], "no-store");
     let html = r.text().await.unwrap();
     assert!(html.contains(&format!("copper://canvas/join/{token}")));
+    // People who are not on Copper join in the browser, with Canvas App at /canvas/.
+    assert!(
+        html.contains(&format!("href=\"/canvas/#/join/{token}\"")),
+        "{html}"
+    );
 }
