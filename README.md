@@ -33,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 or from a release tarball:
 
 ```sh
-tar xzf copper-cloud-0.11.0-linux-x86_64.tar.gz && sudo ./install.sh
+tar xzf copper-cloud-0.11.1-linux-x86_64.tar.gz && sudo ./install.sh
 ```
 
 The installer sets up Postgres (unless you pass `DATABASE_URL`), a `copper-cloud` system user,
@@ -147,7 +147,7 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
 - [Operations](docs/operations.md) — doctor, logs, metrics, backups, upgrades
 - [Onboarding a team](docs/onboarding.md) — single sign-on first, link codes, people, keeping links valid
 - [Single sign-on + agent integrations](docs/sso.md) — Google / OIDC setup, `/start`, agent pairing
-- [v0.11.0 release notes](docs/v0.11.0.md) · [v0.10.0](docs/v0.10.0.md) · [v0.9.0](docs/v0.9.0.md) · [v0.8.1](docs/v0.8.1.md) · [v0.8.0](docs/v0.8.0.md) · [v0.7.0](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
+- [v0.11.1 release notes](docs/v0.11.1.md) · [v0.11.0](docs/v0.11.0.md) · [v0.10.0](docs/v0.10.0.md) · [v0.9.0](docs/v0.9.0.md) · [v0.8.1](docs/v0.8.1.md) · [v0.8.0](docs/v0.8.0.md) · [v0.7.0](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
 
 ## Development
 
