@@ -14,6 +14,9 @@ Shared canvases (live Yjs rooms, chat, mentions, invites, share links) are serve
 proxies the unchanged canvas API to it as the signed-in user, so Coppers need no update. See
 [docs/canvas-link.md](docs/canvas-link.md); upgrading a 0.10.x (or older) instance with canvases:
 [docs/canvas-migration.md](docs/canvas-migration.md).
+People who are not on Copper open shared canvases in any browser at `https://HOST/canvas/`
+([Canvas App](https://github.com/copper-browser/canvas-app)), and share links offer it too
+([docs/canvas.md](docs/canvas.md#canvas-app-canvas)).
 
 People can join with **company single sign-on** (Google Workspace or any OpenID Connect
 provider): share one `https://HOST/start` page, they install Copper and click *Continue with

@@ -2,7 +2,8 @@
 //! the old canvas crate. It is merged at the application root (outside `/v1`, so no instance
 //! key is needed) and deliberately touches neither the database nor Canvas Cloud: it only
 //! checks the token's shape and hands it to Copper as
-//! `copper://canvas/join/{token}?cloud={host}`.
+//! `copper://canvas/join/{token}?cloud={host}`, or to Canvas App in the browser as
+//! `/canvas/#/join/{token}` (`copper_cloud::canvas_app`).
 
 use axum::extract::Path;
 use axum::http::{header, HeaderMap, HeaderValue, Uri};
@@ -108,9 +109,11 @@ pub async fn join_landing(Path(token): Path<String>, uri: Uri, headers: HeaderMa
         })
     });
     let html = match href {
+        // Not on Copper: Canvas App, which this server serves at `/canvas/`, joins in the browser.
         Some(href) => format!(
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Open canvas in Copper</title><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f7f5;color:#171717;font:16px system-ui,sans-serif}}main{{max-width:28rem;padding:2rem;text-align:center}}a{{display:inline-block;padding:.75rem 1.1rem;border-radius:.5rem;background:#171717;color:#fff;text-decoration:none}}a:focus-visible{{outline:3px solid #6d5dfc;outline-offset:3px}}</style></head><body><main><h1>Canvas share link</h1><p>Open this canvas in Copper to continue.</p><a href=\"{}\">Open this canvas in Copper</a></main></body></html>",
-            escape_html(&href)
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Open canvas in Copper</title><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f7f5;color:#171717;font:16px system-ui,sans-serif}}main{{max-width:28rem;padding:2rem;text-align:center}}a{{display:inline-block;padding:.75rem 1.1rem;border-radius:.5rem;background:#171717;color:#fff;text-decoration:none}}a.web{{margin-top:.75rem;background:none;color:#171717;text-decoration:underline}}a:focus-visible{{outline:3px solid #6d5dfc;outline-offset:3px}}</style></head><body><main><h1>Canvas share link</h1><p>Open this canvas in Copper to continue.</p><a href=\"{}\">Open this canvas in Copper</a><br><a class=\"web\" href=\"/canvas/#/join/{}\">Not on Copper? Open it in your browser</a></main></body></html>",
+            escape_html(&href),
+            escape_html(&percent_encode_component(&token))
         ),
         None => "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Open canvas in Copper</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f7f5;color:#171717;font:16px system-ui,sans-serif}main{max-width:28rem;padding:2rem;text-align:center}</style></head><body><main><h1>Canvas share link</h1><p>Open this link in Copper to continue.</p></main></body></html>".to_owned(),
     };

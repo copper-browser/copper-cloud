@@ -65,7 +65,7 @@ Nothing changes while a Canvas Cloud is linked and reachable:
 | Live room | the same y-websocket protocol and close codes (`4403` removed, `4404` deleted, `1001` shutdown, …) |
 | Notifications | `event: canvas` frames on `GET /v1/sync/events` with `{"type":"canvas","canvas_id","kind"}`, same kinds ([below](#event-bridge)) |
 | `GET /v1/info` | same `name`/`version`/limits; `features` gains `"canvas_link"`, and a new `"canvas": {"linked": bool}` object |
-| `/join/{token}` | the same `copper://canvas/join/{token}?cloud={host}` landing page, served by copper-cloud |
+| `/join/{token}` | the `copper://canvas/join/{token}?cloud={host}` landing page, served by copper-cloud, with a link to Canvas App (`/canvas/#/join/{token}`) for browsers |
 
 Clients gate canvas features on the server **version** (share links/people ≥ 0.3.0, invite
 reminders ≥ 0.5.0, mentions ≥ 0.6.0), not on `features`, so nothing has to be negotiated.
@@ -92,7 +92,7 @@ For each request (`crates/canvas-link/src/proxy.rs`):
 2. **Load the link** (decrypted settings cached 5 s; changes made through the admin API apply
    at once, CLI changes within 5 s). None, or `enabled = false` →
    `503 canvas_unavailable`.
-3. **Forward** to `{canvas cloud url}/v1{same path}{same query minus every token= parameter}`.
+3. **Forward** to `{canvas cloud url}/v1{same path}{same query minus every token= and instance= parameter}`.
 
 ### Headers
 
@@ -101,7 +101,8 @@ For each request (`crates/canvas-link/src/proxy.rs`):
 | request | `Content-Type`, `Accept`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `If-Range` | `Authorization` (the Copper session), `Cookie`, `X-Copper-Instance`, hop-by-hop headers, everything else | `Authorization: Bearer <app key>`, `X-Canvas-User: <Copper user id>`, `X-Forwarded-For: <client IP>` (as resolved by copper-cloud, honouring `trust_proxy`) |
 | response | status, body (streamed), `Content-Type`, `Cache-Control`, `ETag`, `Last-Modified`, `Location`, `Retry-After`, `Content-Disposition` | everything else | — |
 
-The `?token=` query parameter (Copper's session token for WebSocket tooling) is consumed by
+The `?token=` query parameter (Copper's session token for WebSocket tooling and browsers) and
+`?instance=` (the gate credential a browser's room socket carries, below) are consumed by
 copper-cloud and removed; all other parameters (`q`, `limit`, `sv`, `unread`, `full`, `ids`,
 `types`, …) pass unchanged. Redirects from Canvas Cloud are not followed.
 
@@ -151,7 +152,7 @@ Canvas Cloud at least as new as the canvas API your Coppers expect.
 before (`crates/canvas-link/src/ws.rs`):
 
 1. copper-cloud first opens the **upstream** WebSocket to the same path on Canvas Cloud
-   (`ws://` or `wss://`, query minus `token=`, app key + `X-Canvas-User` + `X-Forwarded-For`,
+   (`ws://` or `wss://`, query minus `token=` and `instance=`, app key + `X-Canvas-User` + `X-Forwarded-For`,
    HTTP/1.1, 15 s budget).
 2. If Canvas Cloud refuses the handshake with an HTTP status (`403`, `404`, …), Copper gets
    that status and body **without** an upgrade — exactly what the old server did for
@@ -490,7 +491,8 @@ instance runs, canvases are `503`); `FAIL` = linked but unreachable or the key i
 
 - **Copper users authenticate to copper-cloud only** (instance gate + session), exactly as
   before. Canvas Cloud trusts copper-cloud's `X-Canvas-User` assertion for this app's users;
-  it never sees a Copper session token (the `Authorization` header and `?token=` are stripped).
+  it never sees a Copper session token or gate credential (the `Authorization` and
+  `X-Copper-Instance` headers, `?token=` and `?instance=` are stripped).
 - **What the app key can do** on Canvas Cloud: act as any user of this app (every Copper
   user) on the whole canvas API; create, update, disconnect and delete this app's users (with
   `trust_email`, provisioning an email that already has a Canvas Cloud account links that

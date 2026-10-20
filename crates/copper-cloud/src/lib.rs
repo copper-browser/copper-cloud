@@ -5,6 +5,7 @@ pub mod admin;
 pub mod admin_addons;
 pub mod admin_addons_cli;
 pub mod admin_api;
+pub mod canvas_app;
 pub mod cli;
 pub mod doctor;
 pub mod portal;
@@ -17,7 +18,8 @@ use copper_cloud_core::state::SharedState;
 
 /// The full HTTP app: core (`/healthz`, `/v1` auth/pairing/devices/sync) + the canvas API
 /// proxied to the linked Canvas Cloud behind the instance gate, the admin API at
-/// `/admin/api` (cookie sessions, not gated), the `/join/{token}` share-link landing page, the
+/// `/admin/api` (cookie sessions, not gated), the `/join/{token}` share-link landing page,
+/// Canvas App at `/canvas/` (the canvas in any browser), the
 /// SSO onboarding page at `/start` and the embedded admin portal for every other path; auth
 /// rate limiters and request tracing/metrics around everything. Starts the canvas link's
 /// background tasks (event bridge, user reconcile, outbox) when called inside a tokio runtime.
@@ -31,6 +33,7 @@ pub fn build_app_with_link(state: SharedState) -> (Router, CanvasLink) {
     let root = Router::new()
         .nest("/admin/api", admin_api::router())
         .merge(CanvasLink::landing_router())
+        .merge(canvas_app::router())
         .route("/start", axum::routing::get(start::start))
         .fallback(portal::serve);
     let app = copper_cloud_core::app_with(state, link.router(), root)
