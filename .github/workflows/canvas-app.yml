@@ -1,0 +1,86 @@
+# Canvas App (/canvas/) lives in copper-browser/canvas-app; copper-cloud vendors its web build
+# (packaging/sync-canvas-app.sh, docs/canvas.md › Canvas App).
+# - pull requests touching it (or this workflow): the vendored canvas-app.html must be the pinned canvas-app build;
+# - hourly (or by hand): when canvas-app main's web build has changed, push the pinned branch
+#   canvas/take-canvas-app and open or update one issue with its commit list and a link that
+#   opens the PR (the org does not let Actions open pull requests).
+name: Canvas App
+on:
+  pull_request:
+    paths:
+      - crates/copper-cloud/assets/canvas-app.html
+      - crates/copper-cloud/assets/CANVAS_APP_REF
+      - packaging/sync-canvas-app.sh
+      - .github/workflows/canvas-app.yml
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: packaging/sync-canvas-app.sh --check
+  bump:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Pin canvas-app main
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ref=crates/copper-cloud/assets/CANVAS_APP_REF
+          page=crates/copper-cloud/assets/canvas-app.html
+          old=$(cat "$ref")
+          packaging/sync-canvas-app.sh main
+          new=$(cat "$ref")
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          # Only the page counts: a canvas-app commit that leaves dist/web/index.html as it was keeps the pin.
+          if git diff --quiet -- "$page"; then
+            git checkout -- "$ref"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Push the pinned branch, open or update the issue
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OLD: ${{ steps.pin.outputs.old }}
+          NEW: ${{ steps.pin.outputs.new }}
+        run: |
+          branch=canvas/take-canvas-app
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git commit -qam "Canvas App: take canvas-app ${NEW:0:7}" -m "https://github.com/copper-browser/canvas-app/compare/${OLD:0:12}...${NEW:0:12}"
+          # Same tree as the branch already pushed: leave it (and its pull request's CI) alone.
+          if git fetch -q origin "$branch" 2>/dev/null && git diff --quiet FETCH_HEAD HEAD; then
+            echo "$branch already pins canvas-app ${NEW:0:7} on this main"
+          else
+            git push -f origin "$branch"
+          fi
+          log=$(gh api "repos/copper-browser/canvas-app/compare/$OLD...$NEW" --jq '.commits[] | "- " + (.commit.message | split("\n")[0]) + " (" + .sha[0:7] + ")"' | head -50)
+          title="Canvas: canvas-app moved on"
+          body=$(printf 'canvas-app `main` is at %s; copper-cloud pins %s. Branch `%s` pins it and vendors its `dist/web/index.html` as `crates/copper-cloud/assets/canvas-app.html` (`packaging/sync-canvas-app.sh`).\n\n**[Open the pull request](https://github.com/%s/compare/main...%s?expand=1)**\n\n%s\n\nhttps://github.com/copper-browser/canvas-app/compare/%s...%s\n\nThis issue is updated every hour while the pin is behind; it closes when the pin catches up.\n' "${NEW:0:7}" "${OLD:0:7}" "$branch" "$GITHUB_REPOSITORY" "$branch" "$log" "${OLD:0:12}" "${NEW:0:12}")
+          num=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [ -n "$num" ]; then gh issue edit "$num" --body "$body"; else gh issue create --title "$title" --body "$body"; fi
+      - name: Close the issue once the pin has caught up
+        if: steps.pin.outputs.changed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for num in $(gh issue list --state open --search 'in:title "Canvas: canvas-app moved on"' --json number --jq '.[].number'); do
+            gh issue close "$num" --comment "copper-cloud's Canvas App is canvas-app main's (pinned $(cut -c1-7 crates/copper-cloud/assets/CANVAS_APP_REF))."
+          done
