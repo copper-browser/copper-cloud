@@ -142,9 +142,12 @@ Under the Copper button it links to `/canvas/#/join/{token}` for people who are 
 ## Canvas App (`/canvas/`)
 
 `GET /canvas/` serves [Canvas App](https://github.com/copper-browser/canvas-app): the canvas in
-any browser. It is one self-contained file, vendored as
-`crates/copper-cloud/assets/canvas-app.html`. `packaging/sync-canvas-app.sh [REF]` updates it;
-`--check` compares it. The route is ungated, like the landing page, and holds no data.
+any browser. It is one self-contained file, canvas-app's `dist/web/index.html` at the commit
+pinned in `crates/copper-cloud/assets/CANVAS_APP_REF`, vendored as
+`crates/copper-cloud/assets/canvas-app.html`. `packaging/sync-canvas-app.sh REF` pins a new
+commit and fetches its build; with no argument it re-fetches the pinned one, and `--check`
+compares the vendored file with it. The route is ungated, like the landing page, and holds no
+data.
 
 The app reaches the linked Canvas Cloud through the same proxy Copper uses. It runs on the
 server's own origin, so its REST calls need no CORS, which copper-cloud never grants. To use it,
