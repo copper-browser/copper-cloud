@@ -1023,3 +1023,218 @@ async fn handler_panic_becomes_500() {
         .unwrap();
     assert_eq!(r.status(), 200);
 }
+
+#[tokio::test]
+async fn sync_doc_revisions() {
+    let s = start().await;
+    let (dev_a, dev_b) = (new_device(), new_device());
+    let a = s.signup("revs@example.com", PASSWORD, &dev_a).await;
+    let b = common::session_from(
+        &s.login("revs@example.com", PASSWORD, &dev_b)
+            .await
+            .json()
+            .await
+            .unwrap(),
+    );
+    let put = |who: &common::Session, base: i64, doc: String, build: Option<&str>| {
+        let mut rb = s
+            .authed(Method::PUT, "/v1/sync/docs/spaces", who)
+            .json(&json!({"base_version": base, "payload": b64(&doc)}));
+        if let Some(build) = build {
+            rb = rb.header("X-Copper-Build", build);
+        }
+        rb.send()
+    };
+    let doc = |i: i64| format!(r#"{{"spaces":[{{"id":"s{i}"}}]}}"#);
+    let list = |who: &common::Session| {
+        let req = s.authed(Method::GET, "/v1/sync/docs/spaces/revisions", who);
+        async move {
+            req.send()
+                .await
+                .unwrap()
+                .json::<Vec<Value>>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // The first write replaces nothing.
+    assert_eq!(
+        put(&a, 0, doc(1), Some("1.0.1")).await.unwrap().status(),
+        200
+    );
+    assert_eq!(list(&a).await, Vec::<Value>::new());
+    // A stale write is refused and archives nothing.
+    assert_eq!(put(&b, 7, doc(9), None).await.unwrap().status(), 409);
+    assert_eq!(list(&a).await, Vec::<Value>::new());
+    // B (an older client: no build header) overwrites: A's v1 is kept, with A's build.
+    assert_eq!(put(&b, 1, doc(2), None).await.unwrap().status(), 200);
+    let revs = list(&a).await;
+    assert_eq!(revs.len(), 1);
+    assert_eq!(revs[0]["version"], 1);
+    assert_eq!(revs[0]["device_id"], dev_a.as_str());
+    assert_eq!(revs[0]["client_build"], "1.0.1");
+    assert_eq!(revs[0]["bytes"], doc(1).len());
+    assert!(revs[0].get("payload").is_none());
+    // Kept sealed, never in the clear.
+    let stored: Vec<u8> = sqlx::query_scalar("SELECT payload FROM sync_doc_revisions")
+        .fetch_one(&s.state.db)
+        .await
+        .unwrap();
+    assert!(!stored.windows(6).any(|w| w == b"spaces"));
+    // A junk build header is dropped, not stored.
+    assert_eq!(
+        put(&a, 2, doc(3), Some(&"9".repeat(65)))
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert!(list(&a).await[0]["client_build"].is_null());
+
+    // Read one back before restoring it.
+    let got: Value = s
+        .authed(Method::GET, "/v1/sync/docs/spaces/revisions/1", &b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["version"], 1);
+    assert_eq!(unb64(&got["payload"]), doc(1));
+
+    // Restore v1: written back as v4, the replaced v3 is kept, every device gets the event.
+    let uid: uuid::Uuid = a.user_id.parse().unwrap();
+    let mut events = s.state.events.subscribe(uid);
+    let r = s
+        .authed(Method::POST, "/v1/sync/docs/spaces/revisions/1/restore", &b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r: Value = r.json().await.unwrap();
+    assert_eq!(r["version"], 4);
+    assert_eq!(r["restored_from"], 1);
+    match events.try_recv().unwrap() {
+        copper_cloud_core::events::Event::Doc {
+            domain,
+            version,
+            device_id,
+        } => {
+            assert_eq!((domain.as_str(), version, device_id), ("spaces", 4, None));
+        }
+        other => panic!("{other:?}"),
+    }
+    let cur: Value = s
+        .authed(Method::GET, "/v1/sync/docs/spaces", &a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cur["version"], 4);
+    assert_eq!(unb64(&cur["payload"]), doc(1));
+    let versions = |revs: &[Value]| {
+        revs.iter()
+            .map(|r| r["version"].as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(versions(&list(&a).await), [3, 2, 1]);
+
+    // Unknown revision / domain; another user sees nothing.
+    let status = |m: Method, path: &str, who: &common::Session| {
+        let req = s.authed(m, path, who);
+        async move { req.send().await.unwrap().status() }
+    };
+    assert_eq!(
+        status(
+            Method::POST,
+            "/v1/sync/docs/spaces/revisions/99/restore",
+            &a
+        )
+        .await,
+        404
+    );
+    assert_eq!(
+        status(Method::GET, "/v1/sync/docs/spaces/revisions/99", &a).await,
+        404
+    );
+    assert_eq!(
+        status(Method::GET, "/v1/sync/docs/passwords/revisions", &a).await,
+        400
+    );
+    let c = s
+        .signup("revs-other@example.com", PASSWORD, &new_device())
+        .await;
+    assert_eq!(list(&c).await, Vec::<Value>::new());
+    assert_eq!(
+        status(Method::GET, "/v1/sync/docs/spaces/revisions/1", &c).await,
+        404
+    );
+    assert_eq!(
+        status(Method::POST, "/v1/sync/docs/spaces/revisions/1/restore", &c).await,
+        404
+    );
+
+    // Only the newest 20 are kept.
+    for v in 4..30 {
+        assert_eq!(put(&a, v, doc(v), None).await.unwrap().status(), 200);
+    }
+    let revs = list(&a).await;
+    assert_eq!(versions(&revs), (10..30).rev().collect::<Vec<_>>());
+
+    // tabs: restoring another device's tabs is refused; deleting the device drops its revisions.
+    let tabs = format!("/v1/sync/docs/tabs:{dev_b}");
+    for base in 0..2 {
+        let r = s
+            .authed(Method::PUT, &tabs, &b)
+            .json(&json!({"base_version": base, "payload": b64("{}")}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+    assert_eq!(
+        status(Method::POST, &format!("{tabs}/revisions/1/restore"), &a).await,
+        403
+    );
+    s.authed(Method::DELETE, &format!("/v1/devices/{dev_b}"), &a)
+        .send()
+        .await
+        .unwrap();
+    let left: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM sync_doc_revisions WHERE domain LIKE 'tabs:%'")
+            .fetch_one(&s.state.db)
+            .await
+            .unwrap();
+    assert_eq!(left, 0);
+
+    // `copper-cloud admin docs restore` (straight against the database).
+    copper_cloud::admin::docs_command(
+        &s.state.db,
+        copper_cloud::cli::DocsCommand::Restore {
+            user: "REVS@example.com".into(),
+            domain: "spaces".into(),
+            version: 10,
+        },
+    )
+    .await
+    .unwrap();
+    let cur: Value = s
+        .authed(Method::GET, "/v1/sync/docs/spaces", &a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cur["version"], 31);
+    assert_eq!(
+        unb64(&cur["payload"]),
+        doc(9),
+        "v10 was written with doc(9)"
+    );
+    assert!(cur["device_id"].is_null());
+}

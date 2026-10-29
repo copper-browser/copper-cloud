@@ -46,6 +46,9 @@ pub const FEATURES: &[&str] = &[
     "addons",
     // Canvases are served by a linked Canvas Cloud (0.11.0; see `canvas` in `/v1/info`).
     "canvas_link",
+    // `GET /v1/sync/docs/{domain}/revisions` (+ `/{version}`, `/{version}/restore`) and the
+    // optional `X-Copper-Build` header on doc writes (0.12.0).
+    "doc_revisions",
 ];
 
 /// Core `/v1` routes (auth, pairing, devices, sync, intelligence, info). Paths are relative to `/v1`.

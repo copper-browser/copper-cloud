@@ -341,6 +341,9 @@ pub enum AdminCommand {
     /// A user's synced browsing history.
     #[command(subcommand)]
     History(HistoryCommand),
+    /// A user's synced docs (spaces, settings, bookmarks, tabs:<device>): kept revisions.
+    #[command(subcommand)]
+    Docs(DocsCommand),
     /// Company single sign-on (Google or OIDC) for Coppers.
     #[command(subcommand)]
     Sso(SsoCommand),
@@ -447,6 +450,30 @@ pub enum HistoryCommand {
     /// individual entries is up to the user in Copper. Prints the count only. Coppers keep their
     /// local history and see fewer rows on their next pull.
     Delete(HistoryDeleteArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DocsCommand {
+    /// List the kept revisions of one doc, newest first (metadata only; never opens a doc).
+    Revisions {
+        /// The user: email or user id.
+        #[arg(long, value_name = "EMAIL|UUID")]
+        user: String,
+        /// spaces, settings, bookmarks or tabs:<device_id>.
+        #[arg(long)]
+        domain: String,
+    },
+    /// Write a kept revision back as the doc's new version. Running servers send no event;
+    /// Coppers pick it up on their next pull.
+    Restore {
+        #[arg(long, value_name = "EMAIL|UUID")]
+        user: String,
+        #[arg(long)]
+        domain: String,
+        /// The revision's version (from `admin docs revisions`).
+        #[arg(long)]
+        version: i64,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
