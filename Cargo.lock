@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "copper-cloud-canvas-link"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "copper-cloud-canvas-migrate"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "copper-cloud-core"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
