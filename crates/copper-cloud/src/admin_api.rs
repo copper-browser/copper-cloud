@@ -1165,11 +1165,15 @@ async fn delete_device(
     if users.is_empty() {
         return Err(ApiError::NotFound);
     }
-    sqlx::query("DELETE FROM sync_docs WHERE domain = $1 AND user_id = ANY($2)")
+    for table in ["sync_docs", "sync_doc_revisions"] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE domain = $1 AND user_id = ANY($2)"
+        ))
         .bind(copper_cloud_core::sync::tabs_domain(id))
         .bind(&users)
         .execute(&mut *tx)
         .await?;
+    }
     let detail = if let [user] = users.as_slice() {
         json!({ "user_id": user })
     } else {

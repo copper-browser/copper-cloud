@@ -497,6 +497,37 @@ Metadata only:
 
 Payload base64 may be standard or url-safe, padded or not.
 
+Optional request header `X-Copper-Build: <client build>` (printable ASCII, ≤ 64 chars; anything
+else is ignored) is stored with the write and shown in its revision (below). Older clients just
+leave it out.
+
+### Doc revisions (`features`: `doc_revisions`)
+
+The server cannot read a doc, so it keeps what each write replaced: every accepted overwrite
+saves the old version (still encrypted) and the newest 20 per domain are kept. Use them to
+recover from a bad write by any device.
+
+- `GET /v1/sync/docs/{domain}/revisions` → newest first, metadata only:
+
+```json
+[ { "version": 6, "device_id": "uuid", "client_build": "1.0.20261028.3", "updated_at": "…",
+    "replaced_at": "…", "bytes": 5120 } ]
+```
+
+  `updated_at` = when that version was written, `replaced_at` = when a newer write replaced
+  it, `client_build` = its `X-Copper-Build` (or `null`).
+- `GET /v1/sync/docs/{domain}/revisions/{version}` → the revision in the
+  `GET /v1/sync/docs/{domain}` shape (with `payload`); `404` if not kept.
+- `POST /v1/sync/docs/{domain}/revisions/{version}/restore` → writes it back as a new version
+  (the current one becomes a revision too): `200 {"version": 9, "updated_at": "…",
+  "restored_from": 6}` and an SSE `doc` event with `device_id: null`, so every device, the
+  caller's included, pulls it. `404` unknown revision; `403` another device's `tabs:` domain.
+
+Removing a device deletes its `tabs:` doc and that doc's revisions. Operators:
+`copper-cloud admin docs revisions --user EMAIL --domain spaces` and
+`copper-cloud admin docs restore --user EMAIL --domain spaces --version N` (no event; Coppers
+pick it up on their next pull).
+
 ---
 
 ## History 🔒

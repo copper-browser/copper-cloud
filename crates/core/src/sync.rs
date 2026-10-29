@@ -21,7 +21,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderValue};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::Stream;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
@@ -44,6 +44,10 @@ pub const SHARED_DOMAINS: &[&str] = &["spaces", "settings", "bookmarks"];
 /// Prefix of per-device open-tab domains: `tabs:<device_id>`.
 pub const TABS_PREFIX: &str = "tabs:";
 const HISTORY_AAD_DOMAIN: &str = "history";
+/// Replaced versions kept per (user, domain) in `sync_doc_revisions`.
+pub const DOC_REVISIONS_KEPT: i64 = 20;
+/// Optional request header naming the client build that wrote a doc (stored, never trusted).
+pub const BUILD_HEADER: &str = "x-copper-build";
 const DEFAULT_HISTORY_LIMIT: usize = 500;
 /// SSE keepalive comment interval.
 pub const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
@@ -54,6 +58,12 @@ pub(crate) fn routes() -> Router<SharedState> {
     Router::new()
         .route("/sync/docs", get(list_docs))
         .route("/sync/docs/{domain}", get(get_doc).put(put_doc))
+        .route("/sync/docs/{domain}/revisions", get(list_revisions_route))
+        .route("/sync/docs/{domain}/revisions/{version}", get(get_revision))
+        .route(
+            "/sync/docs/{domain}/revisions/{version}/restore",
+            post(restore_revision_route),
+        )
         .route(
             "/sync/history",
             get(pull_history)
@@ -224,6 +234,7 @@ async fn put_doc(
         }
     }
     let domain = parsed.as_str();
+    let build = client_build(req.headers());
     let max_blob = state.cfg.limits.max_blob_bytes;
     let limit = doc_body_limit(max_blob);
     check_content_length(&req, limit)?;
@@ -250,8 +261,9 @@ async fn put_doc(
 
     let written: Option<(i64, OffsetDateTime)> = if base_version == 0 {
         sqlx::query_as(
-            "INSERT INTO sync_docs (user_id, domain, device_id, version, payload, payload_bytes)
-             VALUES ($1, $2, $3, 1, $4, $5)
+            "INSERT INTO sync_docs
+                 (user_id, domain, device_id, version, payload, payload_bytes, client_build)
+             VALUES ($1, $2, $3, 1, $4, $5, $6)
              ON CONFLICT (user_id, domain) DO NOTHING
              RETURNING version, updated_at",
         )
@@ -260,24 +272,17 @@ async fn put_doc(
         .bind(device_id)
         .bind(&sealed)
         .bind(plain_len)
+        .bind(build.as_deref())
         .fetch_optional(&state.db)
         .await?
     } else {
-        sqlx::query_as(
-            "UPDATE sync_docs
-             SET version = version + 1, payload = $4, payload_bytes = $5, device_id = $3,
-                 updated_at = now()
-             WHERE user_id = $1 AND domain = $2 AND version = $6
-             RETURNING version, updated_at",
-        )
-        .bind(user_id)
-        .bind(domain.as_ref())
-        .bind(device_id)
-        .bind(&sealed)
-        .bind(plain_len)
-        .bind(base_version)
-        .fetch_optional(&state.db)
-        .await?
+        let write = DocWrite {
+            device_id: Some(device_id),
+            client_build: build.as_deref(),
+            payload: &sealed,
+            payload_bytes: plain_len,
+        };
+        replace_doc(&state.db, user_id, &domain, Some(base_version), &write).await?
     };
 
     let Some((version, updated_at)) = written else {
@@ -306,6 +311,241 @@ async fn put_doc(
         version,
         updated_at,
     }))
+}
+
+/// `X-Copper-Build` as sent (trimmed, printable ASCII, at most 64 chars), else `None`.
+fn client_build(headers: &header::HeaderMap) -> Option<String> {
+    let raw = headers.get(BUILD_HEADER)?.to_str().ok()?.trim();
+    (!raw.is_empty() && raw.len() <= 64 && raw.bytes().all(|b| b.is_ascii_graphic() || b == b' '))
+        .then(|| raw.to_owned())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Doc revisions
+//
+// The server cannot read a doc, so it cannot tell a good write from a bad one; it keeps what
+// each write replaced instead. Every accepted overwrite copies the old row (sealed bytes as
+// they were, same AAD) into `sync_doc_revisions`, keeping the newest [`DOC_REVISIONS_KEPT`]
+// per (user, domain). A restore writes one back as a new version, so devices pull it like any
+// other write.
+
+/// The new contents of a doc write.
+pub struct DocWrite<'a> {
+    pub device_id: Option<Uuid>,
+    pub client_build: Option<&'a str>,
+    /// Sealed with the user's data key, AAD `"<user_id>:<domain>"`.
+    pub payload: &'a [u8],
+    pub payload_bytes: i32,
+}
+
+/// Overwrite an existing doc (only if it is at `expected` when given), archiving the replaced
+/// row and pruning old revisions, in one transaction. `None` = no such doc / stale `expected`.
+async fn replace_doc(
+    db: &sqlx::PgPool,
+    user_id: Uuid,
+    domain: &str,
+    expected: Option<i64>,
+    write: &DocWrite<'_>,
+) -> ApiResult<Option<(i64, OffsetDateTime)>> {
+    let mut tx = db.begin().await?;
+    // Locks the row, so the archived version is exactly the one this write replaces.
+    let archived = sqlx::query(
+        "INSERT INTO sync_doc_revisions
+             (user_id, domain, version, device_id, client_build, updated_at, payload,
+              payload_bytes)
+         SELECT user_id, domain, version, device_id, client_build, updated_at, payload,
+                payload_bytes
+         FROM (SELECT * FROM sync_docs
+               WHERE user_id = $1 AND domain = $2 AND ($3::bigint IS NULL OR version = $3)
+               FOR UPDATE) cur
+         ON CONFLICT (user_id, domain, version) DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(domain)
+    .bind(expected)
+    .execute(&mut *tx)
+    .await?;
+    let written: Option<(i64, OffsetDateTime)> = sqlx::query_as(
+        "UPDATE sync_docs
+         SET version = version + 1, payload = $4, payload_bytes = $5, device_id = $3,
+             client_build = $6, updated_at = now()
+         WHERE user_id = $1 AND domain = $2 AND ($7::bigint IS NULL OR version = $7)
+         RETURNING version, updated_at",
+    )
+    .bind(user_id)
+    .bind(domain)
+    .bind(write.device_id)
+    .bind(write.payload)
+    .bind(write.payload_bytes)
+    .bind(write.client_build)
+    .bind(expected)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if written.is_none() {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    if archived.rows_affected() > 0 {
+        sqlx::query(
+            "DELETE FROM sync_doc_revisions
+             WHERE user_id = $1 AND domain = $2 AND version < (
+                 SELECT min(version) FROM (
+                     SELECT version FROM sync_doc_revisions
+                     WHERE user_id = $1 AND domain = $2
+                     ORDER BY version DESC LIMIT $3) kept)",
+        )
+        .bind(user_id)
+        .bind(domain)
+        .bind(DOC_REVISIONS_KEPT)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(written)
+}
+
+/// One kept revision (metadata only).
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct RevisionMeta {
+    pub version: i64,
+    pub device_id: Option<Uuid>,
+    pub client_build: Option<String>,
+    /// When this version was written.
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+    /// When a newer write replaced it.
+    #[serde(with = "time::serde::rfc3339")]
+    pub replaced_at: OffsetDateTime,
+    #[sqlx(rename = "payload_bytes")]
+    pub bytes: i32,
+}
+
+/// `user_id`'s kept revisions of `domain`, newest first. Never opens a payload.
+pub async fn list_revisions(
+    db: &sqlx::PgPool,
+    user_id: Uuid,
+    domain: &str,
+) -> ApiResult<Vec<RevisionMeta>> {
+    Ok(sqlx::query_as(
+        "SELECT version, device_id, client_build, updated_at, replaced_at, payload_bytes
+         FROM sync_doc_revisions WHERE user_id = $1 AND domain = $2
+         ORDER BY version DESC",
+    )
+    .bind(user_id)
+    .bind(domain)
+    .fetch_all(db)
+    .await?)
+}
+
+/// Write revision `version` of `user_id`'s `domain` back as a new version (the current one is
+/// archived like any overwrite). The sealed bytes are copied as they are: same user, same AAD,
+/// no data key needed. Returns the new version and its time; `404` if the revision or the doc
+/// is gone. The caller publishes the `doc` event.
+pub async fn restore_revision(
+    db: &sqlx::PgPool,
+    user_id: Uuid,
+    domain: &str,
+    version: i64,
+    device_id: Option<Uuid>,
+) -> ApiResult<(i64, OffsetDateTime)> {
+    let (payload, payload_bytes, client_build): (Vec<u8>, i32, Option<String>) = sqlx::query_as(
+        "SELECT payload, payload_bytes, client_build FROM sync_doc_revisions
+         WHERE user_id = $1 AND domain = $2 AND version = $3",
+    )
+    .bind(user_id)
+    .bind(domain)
+    .bind(version)
+    .fetch_optional(db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    let write = DocWrite {
+        device_id,
+        client_build: client_build.as_deref(),
+        payload: &payload,
+        payload_bytes,
+    };
+    replace_doc(db, user_id, domain, None, &write)
+        .await?
+        .ok_or(ApiError::NotFound)
+}
+
+/// `GET /sync/docs/{domain}/revisions` → kept revisions, newest first (metadata only).
+async fn list_revisions_route(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    Path(domain): Path<String>,
+) -> ApiResult<Json<Vec<RevisionMeta>>> {
+    let domain = Domain::parse(&domain)?.as_str();
+    Ok(Json(
+        list_revisions(&state.db, user.user_id, &domain).await?,
+    ))
+}
+
+/// `GET /sync/docs/{domain}/revisions/{version}` → the revision in the `GET /sync/docs/{domain}`
+/// shape, so a client can look before it restores.
+async fn get_revision(
+    State(state): State<SharedState>,
+    user: KeyedUser,
+    Path((domain, version)): Path<(String, i64)>,
+) -> ApiResult<Json<DocBody>> {
+    let domain = Domain::parse(&domain)?.as_str();
+    let row = sqlx::query_as::<_, DocRow>(
+        "SELECT version, updated_at, device_id, payload FROM sync_doc_revisions
+         WHERE user_id = $1 AND domain = $2 AND version = $3",
+    )
+    .bind(user.user.user_id)
+    .bind(domain.as_ref())
+    .bind(version)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    Ok(Json(decrypt_doc(
+        &user.data_key,
+        user.user.user_id,
+        &domain,
+        &row,
+    )?))
+}
+
+/// `POST /sync/docs/{domain}/revisions/{version}/restore` → `{version, updated_at,
+/// restored_from}` and a `doc` event with no `device_id`, so every device (the caller's too)
+/// pulls it.
+async fn restore_revision_route(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    Path((domain, version)): Path<(String, i64)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let parsed = Domain::parse(&domain)?;
+    if let Domain::Tabs(owner) = parsed {
+        if owner != user.device_id {
+            return Err(ApiError::Forbidden);
+        }
+    }
+    let domain = parsed.as_str();
+    let (new_version, updated_at) = restore_revision(
+        &state.db,
+        user.user_id,
+        &domain,
+        version,
+        Some(user.device_id),
+    )
+    .await?;
+    tracing::info!(domain = %domain, from = version, to = new_version, "sync doc restored");
+    state.events.publish(
+        user.user_id,
+        Event::Doc {
+            domain: domain.into_owned(),
+            version: new_version,
+            device_id: None,
+        },
+    );
+    Ok(Json(json!({
+        "version": new_version,
+        "updated_at": updated_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(anyhow::Error::from)?,
+        "restored_from": version,
+    })))
 }
 
 // ---------------------------------------------------------------------------------------------

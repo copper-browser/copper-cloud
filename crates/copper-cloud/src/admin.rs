@@ -15,8 +15,8 @@ use uuid::Uuid;
 use copper_cloud_core::intelligence;
 
 use crate::cli::{
-    AdminCommand, HistoryCommand, HistoryDeleteArgs, IntegrationCommand, IntelligenceCommand,
-    SsoCommand,
+    AdminCommand, DocsCommand, HistoryCommand, HistoryDeleteArgs, IntegrationCommand,
+    IntelligenceCommand, SsoCommand,
 };
 use copper_cloud_core::{agents, sso};
 
@@ -277,9 +277,70 @@ async fn dispatch(cfg: &Config, pool: &sqlx::PgPool, cmd: AdminCommand) -> anyho
                 println!("deleted {entries} of {email}");
             }
         }
+        AdminCommand::Docs(cmd) => docs_command(pool, cmd).await?,
         AdminCommand::Addons(cmd) => crate::admin_addons_cli::dispatch(cfg, pool, cmd).await?,
     }
     Ok(())
+}
+
+/// `admin docs …`: kept revisions of a user's sync doc (see `sync_doc_revisions`).
+pub async fn docs_command(pool: &sqlx::PgPool, cmd: DocsCommand) -> anyhow::Result<()> {
+    use copper_cloud_core::sync::{self, Domain};
+    match cmd {
+        DocsCommand::Revisions { user, domain } => {
+            let (user_id, email) = resolve_user(pool, &user).await?;
+            let domain = Domain::parse(&domain).map_err(api)?.as_str();
+            let revs = sync::list_revisions(pool, user_id, &domain)
+                .await
+                .map_err(api)?;
+            if revs.is_empty() {
+                println!("no kept revisions of {domain} for {email}");
+            }
+            for r in revs {
+                println!(
+                    "v{}\twritten {}\treplaced {}\t{} bytes\tdevice {}\tbuild {}",
+                    r.version,
+                    fmt_time(r.updated_at),
+                    fmt_time(r.replaced_at),
+                    r.bytes,
+                    r.device_id.map_or_else(|| "-".into(), |d| d.to_string()),
+                    r.client_build.as_deref().unwrap_or("-"),
+                );
+            }
+        }
+        DocsCommand::Restore {
+            user,
+            domain,
+            version,
+        } => {
+            let (user_id, email) = resolve_user(pool, &user).await?;
+            let domain = Domain::parse(&domain).map_err(api)?.as_str();
+            let (new, _) = sync::restore_revision(pool, user_id, &domain, version, None)
+                .await
+                .map_err(|e| anyhow::anyhow!("restoring v{version} of {domain}: {e}"))?;
+            println!("restored {domain} v{version} of {email} as v{new}");
+        }
+    }
+    Ok(())
+}
+
+/// `--user`: a user id or an email (case-insensitive) → (id, email).
+async fn resolve_user(pool: &sqlx::PgPool, user: &str) -> anyhow::Result<(Uuid, String)> {
+    let row: Option<(Uuid, String)> = match Uuid::parse_str(user.trim()) {
+        Ok(id) => {
+            sqlx::query_as("SELECT id, email FROM users WHERE id = $1")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+        }
+        Err(_) => {
+            sqlx::query_as("SELECT id, email FROM users WHERE lower(email) = lower($1)")
+                .bind(user.trim())
+                .fetch_optional(pool)
+                .await?
+        }
+    };
+    row.with_context(|| format!("no user {user}"))
 }
 
 /// `admin history delete`: resolves `--user` (email or id) and deletes or, with `--dry-run`,
@@ -293,21 +354,7 @@ pub async fn history_delete(
 ) -> anyhow::Result<(String, u64)> {
     use copper_cloud_core::sync::{HistoryFilter, HistorySelection};
     let filter = HistoryFilter::new(args.since, args.until, args.device).map_err(api)?;
-    let row: Option<(Uuid, String)> = match Uuid::parse_str(args.user.trim()) {
-        Ok(id) => {
-            sqlx::query_as("SELECT id, email FROM users WHERE id = $1")
-                .bind(id)
-                .fetch_optional(pool)
-                .await?
-        }
-        Err(_) => {
-            sqlx::query_as("SELECT id, email FROM users WHERE lower(email) = lower($1)")
-                .bind(args.user.trim())
-                .fetch_optional(pool)
-                .await?
-        }
-    };
-    let (user_id, email) = row.with_context(|| format!("no user {}", args.user))?;
+    let (user_id, email) = resolve_user(pool, &args.user).await?;
     let n = copper_cloud_core::sync::delete_history(
         pool,
         user_id,

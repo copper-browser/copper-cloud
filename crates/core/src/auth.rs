@@ -752,7 +752,8 @@ async fn rename_device(
     Ok(Json(device))
 }
 
-/// Remove a device: revokes its sessions (FK cascade) and deletes its `tabs:<id>` doc.
+/// Remove a device: revokes its sessions (FK cascade) and deletes its `tabs:<id>` doc
+/// and that doc's revisions.
 async fn delete_device(
     State(state): State<SharedState>,
     user: AuthUser,
@@ -769,11 +770,15 @@ async fn delete_device(
         return Err(ApiError::NotFound);
     }
     let domain = crate::sync::tabs_domain(id);
-    sqlx::query("DELETE FROM sync_docs WHERE user_id = $1 AND domain = $2")
+    for table in ["sync_docs", "sync_doc_revisions"] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE user_id = $1 AND domain = $2"
+        ))
         .bind(user.user_id)
         .bind(&domain)
         .execute(&mut *tx)
         .await?;
+    }
     tx.commit().await?;
     Ok(Json(json!({ "ok": true })))
 }
