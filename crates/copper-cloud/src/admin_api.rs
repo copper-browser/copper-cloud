@@ -1004,6 +1004,10 @@ async fn update_user(
     // sockets there); queued in this transaction so it survives Canvas Cloud being down.
     provision::enqueue_user_changed(&mut tx, id, req.disabled == Some(true)).await?;
     tx.commit().await?;
+    if req.disabled == Some(true) {
+        // Their phones' agent streams close and calls in flight fail now.
+        copper_cloud_core::device_agent::revoke_user(&state, id);
+    }
     link.kick_outbox();
     let mut row = user_by_id(&state.db, id).await?;
     with_canvas_counts(&link, std::slice::from_mut(&mut row)).await;
@@ -1051,6 +1055,8 @@ async fn delete_user(
     .await?;
     provision::enqueue_user_deleted(&mut tx, id).await?;
     tx.commit().await?;
+    // Their links and agent tokens went with the user row; close the streams and calls too.
+    copper_cloud_core::device_agent::revoke_user(&state, id);
     link.kick_outbox();
     Ok(ok())
 }

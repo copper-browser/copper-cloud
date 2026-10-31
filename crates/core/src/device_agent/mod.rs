@@ -17,7 +17,12 @@
 //!   `POST /v1/agent/mcp` (MCP Streamable HTTP, stateless; [`mcp`]). 600 requests/minute per
 //!   token.
 //! * Which link is online and the calls in flight live in the in-memory [`Hub`] (one daemon per
-//!   instance); links and tokens persist (`0016_device_agent.sql`).
+//!   instance); links and tokens persist (`0016_device_agent.sql`). A stream that (re)attaches
+//!   gets every call still waiting on its link again (same request id); at most
+//!   [`crate::config::DeviceAgentTuning::max_pending_per_link`] calls are in flight per link.
+//! * Disabling or deleting a user (admin API) closes their streams with `revoked` and fails
+//!   their calls at once; a change made outside this process (`copper-cloud admin …`) reaches
+//!   the hub through [`start_user_sweep`].
 //! * Logs: one line per agent call (token id, device id, tool, ms, status), never arguments or
 //!   results. Token mints/revokes and link registrations/revokes are logged (like pairing codes,
 //!   these user actions are not in the admin audit log).
@@ -27,6 +32,7 @@ pub(crate) mod mcp;
 
 use std::collections::HashSet;
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, Request, State};
@@ -51,7 +57,7 @@ use crate::config::{Config, TlsMode};
 use crate::error::{ApiError, ApiResult};
 use crate::extract::{check_content_length, read_body, JsonBody, OptionalJsonBody};
 use crate::ids;
-use crate::state::SharedState;
+use crate::state::{AppState, SharedState};
 
 /// Prefix of every agent token.
 pub const AGENT_TOKEN_PREFIX: &str = "cat_";
@@ -488,7 +494,7 @@ async fn open_frames(
     let attached = if row.revoked {
         None
     } else {
-        let (stream, rx) = state.device_agent.attach(id);
+        let (stream, rx) = state.device_agent.attach(id, user.user_id);
         let guard = StreamGuard::new(state.clone(), id, stream);
         // Re-checked after attaching: a revoke that committed since `own_link` found no stream
         // to close, so this one must not stay attached.
@@ -784,6 +790,64 @@ impl RevokedDevice {
             hub.revoke_token(*token);
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Disabled and deleted users
+
+/// A user was disabled or deleted (after the transaction committed): close their streams with
+/// `revoked`, fail their calls in flight and forget their tokens' rate limits.
+pub fn revoke_user(state: &AppState, user_id: Uuid) {
+    if state.device_agent.revoke_user(user_id) {
+        tracing::info!(%user_id, "device agent: user disabled or deleted; streams closed, calls failed");
+    }
+}
+
+/// The hub's users that are missing or disabled in the database are revoked
+/// ([`revoke_user`]); returns how many.
+pub async fn sweep_users(state: &AppState) -> ApiResult<usize> {
+    let users = state.device_agent.users();
+    if users.is_empty() {
+        return Ok(0);
+    }
+    let gone: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT u FROM unnest($1::uuid[]) AS u
+         WHERE NOT EXISTS (SELECT 1 FROM users WHERE id = u AND NOT disabled)",
+    )
+    .bind(&users)
+    .fetch_all(&state.db)
+    .await?;
+    for user in &gone {
+        revoke_user(state, *user);
+    }
+    Ok(gone.len())
+}
+
+/// Users disabled or deleted outside this process (`copper-cloud admin disable-user` /
+/// `delete-user` work on the database directly) are dropped from the hub within
+/// [`crate::config::DeviceAgentTuning::user_sweep`]; their agent tokens stop working at once
+/// regardless. Runs once per hub, inside a tokio runtime; ends with the state or on shutdown.
+pub fn start_user_sweep(state: &SharedState) {
+    if tokio::runtime::Handle::try_current().is_err() || !state.device_agent.claim_sweep() {
+        return;
+    }
+    let weak = Arc::downgrade(state);
+    let every = state.cfg.device_agent.user_sweep;
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut shutdown = crate::shutdown::subscribe();
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                () = crate::shutdown::wait(&mut shutdown) => return,
+            }
+            let Some(state) = weak.upgrade() else { return };
+            if let Err(err) = sweep_users(&state).await {
+                tracing::warn!(error = %err, "device agent user sweep failed");
+            }
+        }
+    });
 }
 
 /// Revoke the link and every agent token of device `device_id` under `users` (inside the

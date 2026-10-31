@@ -78,7 +78,8 @@ pub fn app(state: SharedState, extra_v1: Router<SharedState>) -> Router {
 /// The complete HTTP app: `/healthz`, `/v1/*` (core routes merged with `extra_v1`, e.g. the
 /// canvas router; unknown `/v1` paths are a JSON 404) and `root` (top-level routes and/or a
 /// fallback, e.g. the admin API and the portal), wrapped in the instance gate (which only
-/// guards `/v1`), the auth rate limiters and request tracing/metrics.
+/// guards `/v1`), the auth rate limiters and request tracing/metrics. Starts the device-agent
+/// user sweep ([`crate::device_agent::start_user_sweep`]) when called inside a tokio runtime.
 pub fn app_with(
     state: SharedState,
     extra_v1: Router<SharedState>,
@@ -88,6 +89,7 @@ pub fn app_with(
         auth: AuthRateLimiter::new(state.cfg.limits.auth_per_minute, state.cfg.trust_proxy),
         admin: AuthRateLimiter::new(state.cfg.limits.auth_per_minute, state.cfg.trust_proxy),
     });
+    crate::device_agent::start_user_sweep(&state);
     Router::new()
         .route("/healthz", get(healthz))
         .nest("/v1", router().merge(extra_v1).fallback(not_found))

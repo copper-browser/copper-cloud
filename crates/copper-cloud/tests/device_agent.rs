@@ -1,6 +1,8 @@
 //! Device agent relay (`device_agent`, 0.13.0): links, the frames mailbox, agent tokens,
 //! `/v1/agent/*` outside the gate, and MCP calls relayed to a simulated device (an SSE reader
-//! for `request` / `cancel` frames plus frames POSTs for replies and progress).
+//! for `request` / `cancel` frames plus frames POSTs for replies and progress). 0.13.1:
+//! re-delivery to a new stream, the per-link cap, agents that never read, and disabled or
+//! deleted users.
 
 #![allow(clippy::too_many_lines)]
 
@@ -1601,4 +1603,441 @@ async fn one_log_line_per_call_never_arguments_or_results() {
         assert_eq!(line["tool"], "jev_run", "{line}");
         assert!(line["ms"].is_u64(), "{line}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 0.13.1: re-delivery, the per-link cap, agents that never read, disabled and deleted users
+
+/// The next non-`ping` event within `wait` (`None`: the stream ended).
+async fn next_event_within(dev: &mut SseReader, wait: Duration) -> Option<Ev> {
+    tokio::time::timeout(wait, dev.next_event())
+        .await
+        .expect("timed out waiting for an event")
+}
+
+fn link_uuid(id: &str) -> uuid::Uuid {
+    id.parse().unwrap()
+}
+
+#[tokio::test]
+async fn a_replaced_stream_gets_the_pending_request_again() {
+    // A long deadline and grace: the answer must come from the re-delivery, well before either.
+    let s = start_with(|cfg| {
+        tune(cfg);
+        cfg.device_agent.relay_deadline = Duration::from_secs(60);
+        cfg.device_agent.offline_grace = Duration::from_secs(20);
+    })
+    .await;
+    let p = phone(&s, "ada@example.com").await;
+    let id = register_ok(&s, &p).await["id"].as_str().unwrap().to_owned();
+    let token = token_of(&mint(&s, &p, "phi").await);
+
+    // Stream A gets the request, then dies without replying.
+    let (mut stream_a, _) = connect(&s, &p, &id).await;
+    let started = Instant::now();
+    let args = json!({ "goal": "Find flights to Lisbon on 2026-11-20" });
+    let pending = spawn_call(&s, &token, call(30, "jev_run", args.clone()));
+    let first = next_request(&mut stream_a).await;
+    let rid = first["id"].as_str().unwrap().to_owned();
+    assert_eq!(first["deadline_ms"], 60_000);
+    drop(stream_a);
+    eventually("stream A detached", || async {
+        !s.state.device_agent.is_online(link_uuid(&id))
+    })
+    .await;
+    assert_eq!(
+        s.state.device_agent.in_flight(),
+        1,
+        "the call stays pending"
+    );
+
+    // The phone reconnects: stream B gets the same request (same id, the time it has left).
+    let (mut stream_b, _) = connect(&s, &p, &id).await;
+    let again = next_request(&mut stream_b).await;
+    assert_eq!(again["id"], rid.as_str());
+    assert_eq!(again["method"], "tools/call");
+    assert_eq!(again["params"], first["params"]);
+    assert_eq!(again["caller"], first["caller"]);
+    let left = again["deadline_ms"].as_u64().unwrap();
+    assert!(left > 40_000 && left < 60_000, "{left}");
+    let result =
+        json!({ "content": [{ "type": "text", "text": "DONE: 3 flights" }], "isError": false });
+    post_frames(
+        &s,
+        &p,
+        &id,
+        json!([{ "type": "reply", "id": rid, "result": result }]),
+    )
+    .await;
+    assert_eq!(
+        pending.await.unwrap(),
+        json!({ "jsonrpc": "2.0", "id": 30, "result": result })
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(s.state.device_agent.in_flight(), 0);
+
+    // Superseded while still open: the new stream gets what is still waiting, oldest first; an
+    // answered call is not sent again.
+    let one = spawn_call(&s, &token, call(31, "jev_run", json!({})));
+    let two = spawn_call(&s, &token, call(32, "jev_observe", json!({})));
+    let r1 = next_request(&mut stream_b).await;
+    let r2 = next_request(&mut stream_b).await;
+    let (first_id, second_id) = if r1["params"]["name"] == "jev_run" {
+        (r1["id"].clone(), r2["id"].clone())
+    } else {
+        (r2["id"].clone(), r1["id"].clone())
+    };
+    post_frames(
+        &s,
+        &p,
+        &id,
+        json!([{ "type": "reply", "id": first_id, "result": { "content": [], "isError": false } }]),
+    )
+    .await;
+    assert_eq!(one.await.unwrap()["id"], 31);
+    let (mut stream_c, _) = connect(&s, &p, &id).await;
+    assert_eq!(stream_b.next_event().await.unwrap().name, "superseded");
+    let resent = next_request(&mut stream_c).await;
+    assert_eq!(resent["id"], second_id);
+    post_frames(
+        &s,
+        &p,
+        &id,
+        json!([{ "type": "reply", "id": second_id, "result": { "content": [], "isError": false } }]),
+    )
+    .await;
+    assert_eq!(two.await.unwrap()["id"], 32);
+    assert_eq!(s.state.device_agent.in_flight(), 0);
+}
+
+#[tokio::test]
+async fn calls_past_the_per_link_cap_answer_busy_at_once() {
+    let s = start_with(|cfg| {
+        tune(cfg);
+        cfg.device_agent.relay_deadline = Duration::from_secs(60);
+    })
+    .await;
+    let cap = s.state.cfg.device_agent.max_pending_per_link;
+    assert_eq!(cap, 8, "the documented default");
+    let p = phone(&s, "ada@example.com").await;
+    let id = register_ok(&s, &p).await["id"].as_str().unwrap().to_owned();
+    let token = token_of(&mint(&s, &p, "phi").await);
+    let other = token_of(&mint(&s, &p, "other").await);
+    let (mut dev, _) = connect(&s, &p, &id).await;
+
+    let mut calls = Vec::new();
+    let mut ids = Vec::new();
+    for n in 0..cap {
+        calls.push(spawn_call(
+            &s,
+            &token,
+            call(100 + i64::try_from(n).unwrap(), "jev_run", json!({})),
+        ));
+        ids.push(next_request(&mut dev).await["id"].clone());
+    }
+    let busy = format!("Copper on {DEVICE_NAME} is busy with other calls; try again shortly.");
+    let started = Instant::now();
+    let r = rpc(&s, &token, call(200, "jev_run", json!({}))).await;
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(r["id"], 200);
+    assert_eq!(r["result"]["isError"], true);
+    assert_eq!(text_of(&r["result"]), busy);
+    // Per link, whichever agent asks; as SSE too.
+    let mut answer = sse_call(&s, &other, call(201, "jev_run", json!({}))).await;
+    let msg = answer.next().await.unwrap().json();
+    assert_eq!(text_of(&msg["result"]), busy);
+    assert!(answer.next().await.is_none());
+    assert_eq!(
+        s.state.device_agent.in_flight(),
+        cap,
+        "nothing sent to the device"
+    );
+
+    // One finishes: room for one more.
+    post_frames(
+        &s,
+        &p,
+        &id,
+        json!([{ "type": "reply", "id": ids[0], "result": { "content": [], "isError": false } }]),
+    )
+    .await;
+    calls.remove(0).await.unwrap();
+    let next = spawn_call(&s, &other, call(202, "jev_run", json!({})));
+    ids[0] = next_request(&mut dev).await["id"].clone();
+    calls.insert(0, next);
+    let r = rpc(&s, &token, call(203, "jev_run", json!({}))).await;
+    assert_eq!(text_of(&r["result"]), busy);
+
+    let replies: Vec<Value> = ids
+        .iter()
+        .map(|rid| json!({ "type": "reply", "id": rid, "result": { "content": [], "isError": false } }))
+        .collect();
+    post_frames(&s, &p, &id, Value::Array(replies)).await;
+    for c in calls {
+        assert_eq!(c.await.unwrap()["result"]["isError"], false);
+    }
+    assert_eq!(s.state.device_agent.in_flight(), 0);
+}
+
+#[tokio::test]
+async fn an_agent_that_never_reads_its_answer_still_ends_at_the_deadline() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let s = start_with(|cfg| {
+        tune(cfg);
+        // Room for the flood below on a slow machine before the deadline.
+        cfg.device_agent.relay_deadline = Duration::from_secs(8);
+    })
+    .await;
+    let p = phone(&s, "ada@example.com").await;
+    let id = register_ok(&s, &p).await["id"].as_str().unwrap().to_owned();
+    let token = token_of(&mint(&s, &p, "phi").await);
+    let (mut dev, _) = connect(&s, &p, &id).await;
+
+    // Nothing here may wait on the agent that never reads: a hang is a failure.
+    tokio::time::timeout(Duration::from_secs(45), async {
+        // The stuck agent: an SSE `tools/call` with a progress token over a connection with a tiny
+        // receive buffer, never read.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        let mut stuck = socket.connect(s.addr).await.unwrap();
+        let body = json!({
+            "jsonrpc": "2.0", "id": 40, "method": "tools/call",
+            "params": { "name": "jev_run", "arguments": {}, "_meta": { "progressToken": "p" } },
+        })
+        .to_string();
+        let request = format!(
+            "POST /v1/agent/mcp HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\n\
+             Accept: {SSE_ACCEPT}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            s.addr,
+            body.len()
+        );
+        stuck.write_all(request.as_bytes()).await.unwrap();
+        let started = Instant::now();
+        let rid = next_request(&mut dev).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // The device floods progress (16 MiB of 16 KiB lines, far more than the sockets buffer):
+        // every frames POST still returns at once.
+        let line = "p".repeat(16 * 1024);
+        for batch in 0..16_i64 {
+            let frames: Vec<Value> = (1..=64_i64)
+                .map(|n| json!({ "type": "progress", "id": rid, "seq": batch * 64 + n, "message": line }))
+                .collect();
+            let t = Instant::now();
+            post_frames(&s, &p, &id, Value::Array(frames)).await;
+            assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        }
+
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "the flood must end well before the deadline: {:?}",
+            started.elapsed()
+        );
+
+        // Another agent's call on the same phone goes through meanwhile.
+        let other = token_of(&mint(&s, &p, "other").await);
+        let pending = spawn_call(&s, &other, call(41, "jev_observe", json!({})));
+        let rid2 = next_request(&mut dev).await["id"].clone();
+        post_frames(
+            &s,
+            &p,
+            &id,
+            json!([{ "type": "reply", "id": rid2, "result": { "content": [], "isError": false } }]),
+        )
+        .await;
+        assert_eq!(
+            pending.await.unwrap(),
+            json!({ "jsonrpc": "2.0", "id": 41, "result": { "content": [], "isError": false } })
+        );
+
+        // At the deadline the stuck call is cancelled on the device and leaves the hub, though its
+        // agent has not read a byte.
+        let ev = dev.next_event().await.unwrap();
+        assert_eq!(
+            (ev.name.as_str(), ev.json()),
+            ("cancel", json!({ "id": rid }))
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(7900) && elapsed < Duration::from_secs(20),
+            "{elapsed:?}"
+        );
+        eventually("the stuck call left the hub", || async {
+            s.state.device_agent.in_flight() == 0
+        })
+        .await;
+        // A late reply is ignored; the phone keeps working.
+        post_frames(
+            &s,
+            &p,
+            &id,
+            json!([{ "type": "reply", "id": rid, "result": { "content": [] } }]),
+        )
+        .await;
+        assert_eq!(status(&s, &token).await["online"], true);
+        drop(stuck);
+    })
+    .await
+    .expect("a non-reading agent must not hold anything up");
+}
+
+/// A phone with its stream open and a call in flight (from a token it minted).
+struct Busy {
+    p: Session,
+    token: String,
+    dev: SseReader,
+    call: tokio::task::JoinHandle<Value>,
+}
+
+async fn phone_with_a_call(s: &TestServer, email: &str) -> Busy {
+    let p = phone(s, email).await;
+    let id = register_ok(s, &p).await["id"].as_str().unwrap().to_owned();
+    let token = token_of(&mint(s, &p, "phi").await);
+    let (mut dev, _) = connect(s, &p, &id).await;
+    let call = spawn_call(s, &token, call(50, "jev_run", json!({})));
+    next_request(&mut dev).await;
+    Busy {
+        p,
+        token,
+        dev,
+        call,
+    }
+}
+
+fn hub_users(s: &TestServer) -> Vec<String> {
+    let mut users: Vec<String> = s
+        .state
+        .device_agent
+        .users()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    users.sort_unstable();
+    users
+}
+
+/// The phone's stream gets `revoked` within `wait` and ends, its call fails naming the account,
+/// its token is refused, and the hub holds nothing of the user (stream, call or rate limit).
+async fn assert_user_revoked(s: &TestServer, mut b: Busy, wait: Duration) {
+    let ev = next_event_within(&mut b.dev, wait)
+        .await
+        .expect("revoked event");
+    assert_eq!((ev.name.as_str(), ev.data.as_str()), ("revoked", "{}"));
+    assert!(b.dev.next().await.is_none(), "the stream ends");
+    let answer = tokio::time::timeout(Duration::from_secs(2), b.call)
+        .await
+        .expect("the call fails at once")
+        .unwrap();
+    assert_eq!(answer["result"]["isError"], true);
+    assert!(
+        text_of(&answer["result"]).contains("was disabled or deleted while jev_run was running"),
+        "{answer}"
+    );
+    let r = agent(s, Method::GET, "/v1/agent/status", &b.token)
+        .send()
+        .await
+        .unwrap();
+    expect_error(r, 401, "agent_token").await;
+    assert!(!hub_users(s).contains(&b.p.user_id));
+}
+
+#[tokio::test]
+async fn admin_api_disable_and_delete_close_the_users_streams_and_calls() {
+    // The default (10 s) sweep: the admin API acts at once.
+    let s = start_with(|cfg| {
+        tune(cfg);
+        cfg.device_agent.relay_deadline = Duration::from_secs(60);
+        cfg.device_agent.user_sweep = Duration::from_secs(10);
+    })
+    .await;
+    s.create_admin().await;
+    let cookie = s.admin_login().await;
+    let ada = phone_with_a_call(&s, "ada@example.com").await;
+    let mut bob = phone_with_a_call(&s, "bob@example.com").await;
+    let mut both = vec![ada.p.user_id.clone(), bob.p.user_id.clone()];
+    both.sort_unstable();
+    assert_eq!(hub_users(&s), both);
+
+    let r = s
+        .admin(
+            Method::PATCH,
+            &format!("users/{}", ada.p.user_id),
+            Some(&cookie),
+        )
+        .json(&json!({ "disabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_user_revoked(&s, ada, Duration::from_secs(2)).await;
+    // Bob is untouched.
+    assert_eq!(hub_users(&s), std::slice::from_ref(&bob.p.user_id));
+    assert_eq!(s.state.device_agent.in_flight(), 1);
+    assert_eq!(status(&s, &bob.token).await["online"], true);
+    match bob.dev.next_within(Duration::from_millis(100)).await {
+        Err(()) => {}
+        Ok(Some(ev)) => assert_eq!(ev.name, "ping", "{ev:?}"),
+        Ok(None) => panic!("Bob's stream ended"),
+    }
+
+    let r = s
+        .admin(
+            Method::DELETE,
+            &format!("users/{}", bob.p.user_id),
+            Some(&cookie),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_user_revoked(&s, bob, Duration::from_secs(2)).await;
+    assert_eq!(hub_users(&s), Vec::<String>::new());
+    assert_eq!(s.state.device_agent.in_flight(), 0);
+}
+
+#[tokio::test]
+async fn cli_disable_and_delete_reach_the_running_server_through_the_sweep() {
+    use copper_cloud::cli::AdminCommand;
+
+    let s = start_with(|cfg| {
+        tune(cfg);
+        cfg.device_agent.relay_deadline = Duration::from_secs(60);
+        cfg.device_agent.user_sweep = Duration::from_millis(200);
+    })
+    .await;
+    let cfg = (*s.state.cfg).clone();
+    let ada = phone_with_a_call(&s, "ada@example.com").await;
+    let bob = phone_with_a_call(&s, "bob@example.com").await;
+
+    // `copper-cloud admin …` works on the database only (in production, another process).
+    copper_cloud::admin::run(
+        cfg.clone(),
+        AdminCommand::DisableUser {
+            email: "ada@example.com".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_user_revoked(&s, ada, Duration::from_secs(3)).await;
+    assert_eq!(hub_users(&s), std::slice::from_ref(&bob.p.user_id));
+
+    copper_cloud::admin::run(
+        cfg,
+        AdminCommand::DeleteUser {
+            email: "bob@example.com".into(),
+            yes: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_user_revoked(&s, bob, Duration::from_secs(3)).await;
+    assert_eq!(hub_users(&s), Vec::<String>::new());
+    assert_eq!(s.state.device_agent.in_flight(), 0);
 }

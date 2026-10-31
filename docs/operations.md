@@ -109,7 +109,7 @@ curl -s http://127.0.0.1:9464/metrics
 | `sse_subscribers` | gauge | — (open event streams) |
 | `auth_rate_limited_total` | counter | — |
 | `device_agent_streams` | gauge | — (open device-agent frames streams: phones with Copper on screen) |
-| `device_agent_calls_total` | counter | `status` (`ok`, `tool_error`, `error`, `offline`, `turned_off`, `unknown_tool`, `timeout`, `gone_offline`, `revoked`, `token_revoked`, `cancelled`, `shutdown`) |
+| `device_agent_calls_total` | counter | `status` (`ok`, `tool_error`, `error`, `offline`, `busy`, `turned_off`, `unknown_tool`, `timeout`, `gone_offline`, `revoked`, `token_revoked`, `user_revoked`, `cancelled`, `shutdown`) |
 | `agent_rate_limited_total` | counter | — (`/v1/agent/*` requests refused by the per-token limit) |
 | `db_pool_size`, `db_pool_idle` | gauge | — (refreshed on scrape) |
 | `process_uptime_seconds` | gauge | — |
@@ -215,6 +215,10 @@ sudo copper-cloud admin enable-signup
 ```
 
 `--password` also works but lands in shell history; prefer `--password-stdin`.
+
+These commands work on the database, so a running server learns of a disabled or deleted user
+within 10 s: their device-agent tokens are refused at once, and their phones' agent streams close
+and calls in flight fail at the next sweep (the admin API does all of it at once).
 
 ### Synced history
 

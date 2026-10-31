@@ -539,7 +539,9 @@ key you gave them (directory mode) or the instance link code (open mode).
 
 Disabling revokes all of the user's sessions immediately, disconnects their live canvas
 peers (queued to the linked Canvas Cloud: `disconnect_user`, plus `upsert_user` with
-`disabled: true` — [provisioning](canvas-link.md#user-provisioning)) and blocks sign-in (`401 account_disabled` in Copper). `display_name` must not be empty.
+`disabled: true` — [provisioning](canvas-link.md#user-provisioning)) and blocks sign-in (`401 account_disabled` in Copper). Their phones' [device agent](api.md#device-agent-relay)
+streams close with `revoked` and their agent calls in flight fail (0.13.1); their agent tokens
+are refused until they are enabled again. `display_name` must not be empty.
 Unknown id (or not a UUID) → `404`.
 
 ### `DELETE /admin/api/users/{id}`
@@ -549,7 +551,8 @@ pairing codes, access keys bound to their email, their legacy (pre-0.9) canvas r
 legacy invites addressed to their email. On the linked Canvas Cloud (queued in the same
 transaction, `delete_user`) their app user is deleted together with the canvases they own
 (Personal and shared — including other members' access to them) and their memberships;
-Canvas Cloud closes those rooms.
+Canvas Cloud closes those rooms. Their device agent links and tokens go with the user; their
+phones' agent streams close with `revoked` and calls in flight fail at once (0.13.1).
 
 ```json
 { "ok": true }
