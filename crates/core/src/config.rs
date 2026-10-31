@@ -140,6 +140,12 @@ pub struct DeviceAgentTuning {
     pub offline_grace: std::time::Duration,
     /// Requests per minute per agent token on `/v1/agent/*` (600).
     pub agent_per_minute: u32,
+    /// Most calls in flight per link; one more answers "busy" at once (8; the phone runs one
+    /// at a time).
+    pub max_pending_per_link: usize,
+    /// How often the hub drops what it holds of users disabled or deleted outside this process,
+    /// e.g. by `copper-cloud admin disable-user` (10 s).
+    pub user_sweep: std::time::Duration,
 }
 
 impl Default for DeviceAgentTuning {
@@ -152,6 +158,8 @@ impl Default for DeviceAgentTuning {
             online_window: Duration::from_secs(45),
             offline_grace: Duration::from_secs(15),
             agent_per_minute: 600,
+            max_pending_per_link: 8,
+            user_sweep: Duration::from_secs(10),
         }
     }
 }

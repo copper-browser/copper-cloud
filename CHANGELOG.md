@@ -2,6 +2,23 @@
 
 Newest first. Each release also has fuller notes in `docs/vX.Y.Z.md`.
 
+## 0.13.1
+
+Device agent relay fixes ([notes](docs/v0.13.1.md)). No migrations; a binary swap either way.
+
+- A pending request is sent again (same id, the time it has left) on every stream the phone
+  opens, so a stream that dies mid-call no longer leaves the agent waiting out the 200 s
+  deadline; the call fails after 15 s offline as before
+  ([re-delivery](docs/api.md#get-v1melinksidframes--sse-mailbox)).
+- At most 8 calls in flight per link; one more answers at once, `isError: true`, "Copper on
+  <device> is busy with other calls; try again shortly." (status `busy`).
+- Each relayed call waits in its own task: it ends at its deadline whether or not the agent reads
+  its SSE answer; a slow reader loses progress notifications beyond 32 (never the response) and
+  never holds up a frames POST or other calls.
+- Disabling or deleting a user closes their phones' streams with `revoked`, fails their calls in
+  flight (status `user_revoked`) and drops their rate limits: at once from the admin API, within
+  10 s from `copper-cloud admin disable-user` / `delete-user`.
+
 ## 0.13.0
 
 Agents can use a person's Copper for iOS through the cloud ([notes](docs/v0.13.0.md)). One new

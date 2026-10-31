@@ -135,12 +135,20 @@ An agent calls a person's Copper for iOS through `POST /v1/agent/mcp` (ungated, 
 the phone holds `GET /v1/me/links/{id}/frames` open while Copper is on screen and posts replies
 to the same path ([api.md](api.md#device-agent-relay)). The in-process `device_agent::Hub` (on
 `AppState`, like `Events`) maps each link to its current frames stream (`mpsc` sender, stream id,
-last heartbeat) and each request id (`req_…`) to the waiting call (`oneshot` for the reply,
-`mpsc` for progress). A call is handed down only if the link is online (stream open, heard from
-within 45 s); otherwise the agent is answered at once. The waiting side is a stream that owns a
-guard: dropping it — the JSON handler future or the SSE body, when the agent goes away — sends
-the device a `cancel`. Deadline (200 s), offline grace (15 s), revoke and shutdown end the call
-with an `isError` result. Links, manifests and token hashes are in Postgres; nothing about calls
+user, last heartbeat), each request id (`req_…`) to the waiting call (the `request` frame and its
+deadline, a `oneshot` for the reply, a bounded `mpsc` for progress) and each agent token to its
+rate limit. A call is handed down only if the link is online (stream open, heard from within
+45 s) and has fewer than 8 calls in flight; otherwise the agent is answered at once. When a
+stream (re)attaches, every call still waiting on its link is sent on it again (same id, the time
+left as `deadline_ms`); the phone answers a request it already answered with its stored reply.
+Each call waits in a task of its own, apart from the agent's response: the agent's JSON handler
+or SSE body only holds the receiving ends, and dropping them (the agent went away) sends the
+device a `cancel`. Deadline (200 s), offline grace (15 s), revoke and shutdown end the call with
+an `isError` result whether or not the agent reads; a slow SSE reader loses progress lines (32
+buffered), never the response, and a frames POST never waits. Disabling or deleting a user
+through the admin API revokes everything of theirs in the hub at once; a background sweep (every
+10 s, only while the hub holds anything) does the same for users changed outside the process
+(`copper-cloud admin …`). Links, manifests and token hashes are in Postgres; nothing about calls
 is stored, and the per-call log line never carries arguments or results.
 
 ## Encryption at rest

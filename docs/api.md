@@ -896,10 +896,18 @@ is one JSON object:
 | `cancel` | `{"id": "req_…"}` — the agent went away, timed out or was revoked; stop that call |
 | `ping` | `{}` every 15 s |
 | `superseded` | `{}`, then the stream closes; do not reconnect from this stream |
-| `revoked` | `{}`, then the stream closes; the user turned the link off |
+| `revoked` | `{}`, then the stream closes; the user turned the link off, or the account was disabled or deleted |
 
 Opening a revoked link's stream answers `hello` (`"revoked": true`), then `revoked`, then closes.
 The stream also ends on server shutdown and when the session is revoked (checked every 5 min).
+
+**Re-delivery (0.13.1).** A call stays pending when the stream its request went down ends
+without a reply. Every stream the device opens (a reconnect, or one that supersedes a stream
+still open) gets, right after `hello`, every request still pending on its link, oldest first,
+with the same `id`, `method`, `params` and `caller`, and `deadline_ms` = the time the call has
+left. The device must treat a request id it has already seen as the same call: answer a finished
+one with its stored reply, ignore one it is still running. A pending call with no stream fails
+after 15 s ([below](#post-v1agentmcp--mcp-streamable-http-stateless)).
 
 #### `POST /v1/me/links/{id}/frames`
 
@@ -990,13 +998,18 @@ answer `405 method_not_allowed` with `Allow: POST`: there is no server-initiated
 - **Offline**: at once, `{"content": [{"type": "text", "text": "Copper isn't open on <device
   name>. Ask the person to open Copper on their iPhone and keep it on screen (Settings › Agents ›
   Let agents use this iPhone must be on), then try again."}], "isError": true}`.
+- **Busy** (0.13.1): when the device already has 8 calls in flight (from any of its agents), at
+  once, `isError: true` with "Copper on <device name> is busy with other calls; try again
+  shortly." Nothing is sent to the device.
 - Otherwise the device gets a `request` frame (deadline 200 s) and the server waits for its
   reply. A reply's `result` is the JSON-RPC result as sent; a reply `error` becomes
   `isError: true` with its message. A deadline miss sends `cancel` to the device and answers
-  `isError: true` ("… timed out …"). If the device is offline for 15 s while the call runs
-  (Copper left the screen), the call is cancelled and answers `isError: true` then, instead of
-  waiting out the deadline. Revoking the link or the token mid-call, or a server shutdown,
-  answers `isError: true` too.
+  `isError: true` ("… timed out …"). If the device's stream drops mid-call, the request is sent
+  again on the stream it opens next ([re-delivery](#get-v1melinksidframes--sse-mailbox)); if
+  the device stays offline for 15 s while the call runs (Copper left the screen), the call is
+  cancelled and answers `isError: true` then, instead of waiting out the deadline. Revoking the
+  link or the token mid-call, disabling or deleting the account, or a server shutdown, answers
+  `isError: true` too.
 - With `text/event-stream` in the request's `Accept`, the answer is an SSE stream
   (`Cache-Control: no-store`, `X-Accel-Buffering: no`): a `: keepalive` comment after every 10 s
   of silence (proxies drop idle requests at 60 s), an `event: message` with
@@ -1005,6 +1018,9 @@ answer `405 method_not_allowed` with `Allow: POST`: there is no server-initiated
   `event: message` with the JSON-RPC response, and the stream ends. Otherwise one
   `application/json` response (progress is not delivered). Every other method answers
   `application/json`.
+- The call ends at its deadline (or any of the above) whether or not the agent reads its
+  answer, and an agent that reads slowly holds up nothing else: up to 32 progress notifications
+  wait for it, later ones are dropped until it catches up (the response is never dropped).
 - The agent disconnecting mid-call (closing the request or the stream) sends `cancel` to the
   device.
 - One log line per call — token id, device id, tool name, duration (`ms`), outcome (`status`) —

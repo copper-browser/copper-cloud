@@ -117,6 +117,8 @@ async fn dispatch(cfg: &Config, pool: &sqlx::PgPool, cmd: AdminCommand) -> anyho
             if !yes && !confirm(&format!("Delete {email} and ALL their synced data? [y/N] "))? {
                 bail!("aborted");
             }
+            // Their agent tokens stop working at once; a running server closes their phones'
+            // agent streams within its device-agent user sweep (10 s).
             sqlx::query("DELETE FROM users WHERE id = $1")
                 .bind(id)
                 .execute(pool)
@@ -125,6 +127,7 @@ async fn dispatch(cfg: &Config, pool: &sqlx::PgPool, cmd: AdminCommand) -> anyho
         }
         AdminCommand::DisableUser { email } => {
             let id = find_user(pool, &email).await?;
+            // As for delete-user: tokens refused at once, streams closed by the user sweep.
             let mut tx = pool.begin().await?;
             sqlx::query("UPDATE users SET disabled = true, updated_at = now() WHERE id = $1")
                 .bind(id)

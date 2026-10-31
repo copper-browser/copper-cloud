@@ -334,7 +334,9 @@ signed-in tabs, so it is as powerful as the phone's browser while Copper is open
   and the person has turned agents on (the phone holds the stream); every call is announced on
   the page with Stop. Revoking a token, revoking the link or deleting the device takes effect at
   once: calls in flight fail and the device gets a `cancel`. A disabled account's tokens stop
-  working.
+  working; disabling or deleting a user also closes their phones' streams and fails their calls
+  (at once from the admin API, within 10 s from `copper-cloud admin`). At most 8 calls are in
+  flight per phone.
 - **Devices only feed their own link.** Only the link's own device (its session) may open or
   post to its frames; a reply is matched to the request id and the link it was sent to.
 - **Nothing about calls is stored.** One log line per call (token id, device id, tool, duration,

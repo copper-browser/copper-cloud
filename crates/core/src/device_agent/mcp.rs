@@ -1,12 +1,17 @@
 //! The agent side: `GET /v1/agent/status` and `POST /v1/agent/mcp` — MCP Streamable HTTP,
 //! stateless — authenticated by a `cat_` token instead of the instance gate.
 //!
-//! `tools/call` is relayed to the device: offline, turned off or an unknown tool answer at
+//! `tools/call` is relayed to the device: offline, turned off, busy or an unknown tool answer at
 //! once; otherwise a `request` frame goes down the device's stream and the reply comes back as
 //! the JSON-RPC result. With `Accept: text/event-stream` the answer is an SSE stream (keepalive
 //! comments, `notifications/progress` when the call carried a progress token, then the
 //! response); otherwise one JSON response. A deadline miss, or the agent going away, sends the
 //! device a `cancel`.
+//!
+//! Each relayed call waits in its own task, apart from the agent's response: the deadline ends it
+//! whether or not the agent reads its answer, and a slow reader only loses progress lines
+//! (up to [`AGENT_BUFFER`] wait for it, later ones are dropped) — it never holds up the device's
+//! frames POST or anyone else's calls.
 
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
@@ -18,14 +23,15 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::Event as SseEvent;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use futures::{Stream, StreamExt as _};
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use time::OffsetDateTime;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use super::hub::{new_request_id, Call, Progress, Reply};
+use super::hub::{self, new_request_id, Call, Progress, Refused, Reply};
 use super::{plausible_agent_token, sse_response};
 use crate::error::{ApiError, ApiResult};
 use crate::extract::{check_content_length, read_body};
@@ -106,7 +112,7 @@ impl FromRequestParts<SharedState> for AgentCaller {
             return Err(bad_token());
         };
         tracing::Span::current().record("user_id", tracing::field::display(user_id));
-        if !state.device_agent.allow(token_id) {
+        if !state.device_agent.allow(user_id, token_id) {
             metrics::counter!("agent_rate_limited_total").increment(1);
             tracing::warn!(%token_id, "agent rate limit exceeded");
             return Err(ApiError::RateLimited);
@@ -471,6 +477,10 @@ fn turned_off_text(device: &str) -> String {
     )
 }
 
+fn busy_text(device: &str) -> String {
+    format!("Copper on {device} is busy with other calls; try again shortly.")
+}
+
 fn unknown_tool_text(tool: &str, device: &str) -> String {
     format!(
         "Copper on {device} has no tool named \"{tool}\". Call tools/list for the tools it offers."
@@ -483,11 +493,6 @@ struct RelayInfo {
     device_name: String,
     link: Uuid,
     progress_token: Option<Value>,
-}
-
-enum CallEvent {
-    Progress(String),
-    Done(String),
 }
 
 fn progress_notification(token: &Value, p: &Progress) -> String {
@@ -527,6 +532,12 @@ fn outcome(
             )),
             "token_revoked",
         ),
+        Ok(Reply::UserRemoved) => (
+            tool_error(&format!(
+                "The account {device} is signed in to was disabled or deleted while {tool} was running; the call was stopped."
+            )),
+            "user_revoked",
+        ),
         Err(_) => (
             tool_error(&format!("{tool} ended on {device} without a reply.")),
             "error",
@@ -534,79 +545,114 @@ fn outcome(
     }
 }
 
-/// Wait for the device: progress events while it works, then exactly one `Done` with the
-/// JSON-RPC response. The guard travels inside, so dropping the stream cancels the call.
-// `state` and `info` are moved into the stream; clippy cannot see through `stream!`.
-#[allow(clippy::needless_pass_by_value)]
-fn relay(
+/// Where a relayed call's answer goes: `done` gets the JSON-RPC response; `progress` (SSE with a
+/// progress token only) gets `notifications/progress` lines, best effort.
+struct Answer {
+    progress: Option<mpsc::Sender<String>>,
+    done: oneshot::Sender<String>,
+}
+
+/// Progress lines buffered for the agent; a reader this far behind loses the newest.
+const AGENT_BUFFER: usize = 32;
+
+/// Wait for the device in a task of its own: forward progress while it works, then send the
+/// JSON-RPC response to `answer.done`. The deadline, shutdown, an offline device and the agent
+/// going away (its end of `done` dropped) all end the wait, whether or not the agent is reading.
+async fn relay(
     state: SharedState,
     call: Call,
     mut guard: CallGuard,
     info: RelayInfo,
-) -> impl Stream<Item = CallEvent> {
-    let tuning = state.cfg.device_agent.clone();
+    mut answer: Answer,
+) {
+    let tuning = &state.cfg.device_agent;
     let mut shutdown = crate::shutdown::subscribe();
-    async_stream::stream! {
-        let Call { mut reply, mut progress } = call;
-        let deadline = tokio::time::sleep(tuning.relay_deadline);
-        tokio::pin!(deadline);
-        let mut watch = tokio::time::interval(
-            WATCH_EVERY.min(tuning.offline_grace / 4).max(Duration::from_millis(10)),
-        );
-        watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut offline_since: Option<Instant> = None;
-        let mut progress_open = true;
-        let (result, status) = loop {
-            tokio::select! {
-                // The deadline and shutdown first (a flood of progress cannot hold them off),
-                // then progress before the reply, so frames uploaded just before it still go
-                // out.
-                biased;
-                () = &mut deadline => {
+    let Call {
+        mut reply,
+        mut progress,
+        deadline,
+    } = call;
+    let deadline = tokio::time::sleep_until(deadline.into());
+    tokio::pin!(deadline);
+    let mut watch = tokio::time::interval(
+        WATCH_EVERY
+            .min(tuning.offline_grace / 4)
+            .max(Duration::from_millis(10)),
+    );
+    watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut offline_since: Option<Instant> = None;
+    let mut progress_open = true;
+    let (result, status) = loop {
+        tokio::select! {
+            // The deadline and shutdown first (a flood of progress cannot hold them off), then
+            // progress before the reply, so frames uploaded just before it still go out.
+            biased;
+            () = &mut deadline => {
+                state.device_agent.cancel(&guard.request_id);
+                let text = format!(
+                    "{} timed out: {} did not answer within {} s, so the call was cancelled. \
+                     Try again, or ask the person to check Copper on their iPhone.",
+                    info.tool, info.device_name, tuning.relay_deadline.as_secs_f64().ceil()
+                );
+                break (tool_error(&text), "timeout");
+            }
+            () = crate::shutdown::wait(&mut shutdown) => {
+                state.device_agent.cancel(&guard.request_id);
+                let text = format!(
+                    "Copper Cloud is restarting, so {} was stopped. Try again in a moment.",
+                    info.tool
+                );
+                break (tool_error(&text), "shutdown");
+            }
+            // The agent went away: dropping the guard cancels the call on the device.
+            () = answer.done.closed() => return,
+            p = progress.recv(), if progress_open => match p {
+                Some(p) => {
+                    if let (Some(out), Some(token)) = (&answer.progress, &info.progress_token) {
+                        // Never wait for the agent: a full buffer drops this line.
+                        let _ = out.try_send(progress_notification(token, &p));
+                    }
+                }
+                None => progress_open = false,
+            },
+            r = &mut reply => break outcome(r, &info),
+            _ = watch.tick() => {
+                if state.device_agent.is_online(info.link) {
+                    offline_since = None;
+                } else if offline_since.get_or_insert_with(Instant::now).elapsed()
+                    >= tuning.offline_grace
+                {
                     state.device_agent.cancel(&guard.request_id);
                     let text = format!(
-                        "{} timed out: {} did not answer within {} s, so the call was cancelled. \
-                         Try again, or ask the person to check Copper on their iPhone.",
-                        info.tool, info.device_name, tuning.relay_deadline.as_secs_f64().ceil()
+                        "Copper closed on {} before {} finished (it is no longer open on \
+                         their screen). Ask the person to open Copper again, then try again.",
+                        info.device_name, info.tool
                     );
-                    break (tool_error(&text), "timeout");
-                }
-                () = crate::shutdown::wait(&mut shutdown) => {
-                    state.device_agent.cancel(&guard.request_id);
-                    let text = format!(
-                        "Copper Cloud is restarting, so {} was stopped. Try again in a moment.",
-                        info.tool
-                    );
-                    break (tool_error(&text), "shutdown");
-                }
-                p = progress.recv(), if progress_open => match p {
-                    Some(p) => {
-                        if let Some(token) = &info.progress_token {
-                            yield CallEvent::Progress(progress_notification(token, &p));
-                        }
-                    }
-                    None => progress_open = false,
-                },
-                r = &mut reply => break outcome(r, &info),
-                _ = watch.tick() => {
-                    if state.device_agent.is_online(info.link) {
-                        offline_since = None;
-                    } else if offline_since.get_or_insert_with(Instant::now).elapsed()
-                        >= tuning.offline_grace
-                    {
-                        state.device_agent.cancel(&guard.request_id);
-                        let text = format!(
-                            "Copper closed on {} before {} finished (it is no longer open on \
-                             their screen). Ask the person to open Copper again, then try again.",
-                            info.device_name, info.tool
-                        );
-                        break (tool_error(&text), "gone_offline");
-                    }
+                    break (tool_error(&text), "gone_offline");
                 }
             }
-        };
-        guard.finish(status);
-        yield CallEvent::Done(rpc_result(&info.id, &result));
+        }
+    };
+    guard.finish(status);
+    // Progress first, then the response: the agent's stream drains the lines, then reads this.
+    drop(answer.progress);
+    let _ = answer.done.send(rpc_result(&info.id, &result));
+}
+
+/// An SSE answer: the progress lines, then the response.
+fn answer_stream(
+    progress: Option<mpsc::Receiver<String>>,
+    done: oneshot::Receiver<String>,
+) -> impl Stream<Item = Result<SseEvent, Infallible>> {
+    async_stream::stream! {
+        if let Some(mut progress) = progress {
+            while let Some(line) = progress.recv().await {
+                yield Ok(message_event(line));
+            }
+        }
+        if let Ok(body) = done.await {
+            yield Ok(message_event(body));
+        }
     }
 }
 
@@ -682,22 +728,35 @@ async fn tools_call(
     }
     let tuning = &state.cfg.device_agent;
     let request_id = new_request_id();
-    let frame = json!({
-        "id": request_id,
-        "method": "tools/call",
-        "params": { "name": name, "arguments": arguments },
-        "caller": { "token_id": caller.token_id, "label": caller.label },
-        "deadline_ms": u64::try_from(tuning.relay_deadline.as_millis()).unwrap_or(u64::MAX),
-    })
-    .to_string();
-    let Some(call) = state
-        .device_agent
-        .begin(link.id, caller.token_id, &request_id, frame)
-    else {
-        audit.log("offline");
-        return answer_now(&id, &tool_error(&offline_text(device)), wants_sse);
+    let mut frame = Map::new();
+    frame.insert("id".into(), Value::from(request_id.as_str()));
+    frame.insert("method".into(), Value::from("tools/call"));
+    frame.insert(
+        "params".into(),
+        json!({ "name": name, "arguments": arguments }),
+    );
+    frame.insert(
+        "caller".into(),
+        json!({ "token_id": caller.token_id, "label": caller.label }),
+    );
+    let call = match state.device_agent.begin(hub::Request {
+        link: link.id,
+        user: caller.user_id,
+        token: caller.token_id,
+        id: request_id.clone(),
+        frame,
+        timeout: tuning.relay_deadline,
+    }) {
+        Ok(call) => call,
+        Err(Refused::Offline) => {
+            audit.log("offline");
+            return answer_now(&id, &tool_error(&offline_text(device)), wants_sse);
+        }
+        Err(Refused::Busy) => {
+            audit.log("busy");
+            return answer_now(&id, &tool_error(&busy_text(device)), wants_sse);
+        }
     };
-    let keepalive = tuning.agent_keepalive;
     let info = RelayInfo {
         id,
         tool: name.to_owned(),
@@ -710,22 +769,44 @@ async fn tools_call(
         request_id,
         audit: Some(audit),
     };
-    let events = relay(state, call, guard, info);
+    relayed(state, call, guard, info, wants_sse).await
+}
+
+/// Start the call's [`relay`] task and answer the agent from it: an SSE stream, or one JSON
+/// response once it is done.
+async fn relayed(
+    state: SharedState,
+    call: Call,
+    guard: CallGuard,
+    info: RelayInfo,
+    wants_sse: bool,
+) -> Response {
+    let keepalive = state.cfg.device_agent.agent_keepalive;
+    let (progress_tx, progress_rx) = if wants_sse && info.progress_token.is_some() {
+        let (tx, rx) = mpsc::channel(AGENT_BUFFER);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+    let (done_tx, done_rx) = oneshot::channel();
+    tokio::spawn(relay(
+        state,
+        call,
+        guard,
+        info,
+        Answer {
+            progress: progress_tx,
+            done: done_tx,
+        },
+    ));
     if wants_sse {
-        let stream = events.map(|ev| match ev {
-            CallEvent::Progress(body) | CallEvent::Done(body) => {
-                Ok::<_, Infallible>(message_event(body))
-            }
-        });
-        return sse_response(stream, Some(keepalive));
+        return sse_response(answer_stream(progress_rx, done_rx), Some(keepalive));
     }
-    let mut events = std::pin::pin!(events);
-    while let Some(ev) = events.next().await {
-        if let CallEvent::Done(body) = ev {
-            return json_answer(StatusCode::OK, body);
-        }
+    // Dropping this future (the agent went away) drops `done_rx`, which ends the call.
+    match done_rx.await {
+        Ok(body) => json_answer(StatusCode::OK, body),
+        Err(_) => ApiError::internal("relay ended without an answer").into_response(),
     }
-    ApiError::internal("relay ended without an answer").into_response()
 }
 
 #[cfg(test)]

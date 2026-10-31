@@ -31,6 +31,7 @@ impl AppState {
         let device_agent = crate::device_agent::Hub::new(
             cfg.device_agent.agent_per_minute,
             cfg.device_agent.online_window,
+            cfg.device_agent.max_pending_per_link,
         );
         Arc::new(Self {
             db,
