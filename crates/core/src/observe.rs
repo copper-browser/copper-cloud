@@ -88,6 +88,18 @@ pub fn install_metrics() -> anyhow::Result<PrometheusHandle> {
         "DELETE /v1/sync/history calls refused by the per-user rate limit"
     );
     metrics::describe_gauge!("sse_subscribers", "Open /v1/sync/events streams");
+    metrics::describe_gauge!(
+        "device_agent_streams",
+        "Open device-agent frames streams (/v1/me/links/{id}/frames)"
+    );
+    metrics::describe_counter!(
+        "device_agent_calls_total",
+        "Agent tools/call requests by outcome (ok, tool_error, error, offline, turned_off, unknown_tool, timeout, gone_offline, revoked, token_revoked, cancelled, shutdown)"
+    );
+    metrics::describe_counter!(
+        "agent_rate_limited_total",
+        "/v1/agent/* requests rejected by the per-token rate limit"
+    );
     metrics::describe_gauge!("db_pool_size", "Postgres pool connections (open)");
     metrics::describe_gauge!("db_pool_idle", "Postgres pool connections (idle)");
     metrics::describe_counter!(

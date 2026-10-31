@@ -69,7 +69,11 @@ by `"…"`:
 `POST /v1/sync/history`) log one `history entries skipped` warning per request with the count
 and the first index/reason. `DELETE /v1/sync/history` logs one `history deleted` line with the
 count deleted, how many seqs were asked for, and which filters were used (never the times,
-seqs or anything about the entries). Useful filters:
+seqs or anything about the entries). Every agent `tools/call` through the device agent relay
+logs one `agent call` line with `token_id`, `device_id`, `tool`, `ms` and `status` (never
+arguments or results); token mints/revokes and link registrations/revokes log `agent token
+minted`, `agent token revoked`, `device link registered` and `device link revoked`. Useful
+filters:
 
 ```sh
 journalctl -u copper-cloud -o cat | jq -c 'select(.level=="ERROR")'
@@ -78,6 +82,7 @@ journalctl -u copper-cloud -o cat | jq -c 'select(.message=="history entries ski
 journalctl -u copper-cloud -o cat | jq -c 'select(.message=="history deleted")'
 journalctl -u copper-cloud -o cat | jq -c 'select(.span.status==429)'
 journalctl -u copper-cloud -o cat | jq -c 'select(.message=="login failed")'
+journalctl -u copper-cloud -o cat | jq -c 'select(.message=="agent call") | {token_id, device_id, tool, ms, status}'
 ```
 
 Change verbosity with `log_level = "debug"` or `RUST_LOG=copper_cloud_core=debug,info`
@@ -103,6 +108,9 @@ curl -s http://127.0.0.1:9464/metrics
 | `history_delete_rate_limited_total` | counter | — (`DELETE /v1/sync/history` refused with `429`) |
 | `sse_subscribers` | gauge | — (open event streams) |
 | `auth_rate_limited_total` | counter | — |
+| `device_agent_streams` | gauge | — (open device-agent frames streams: phones with Copper on screen) |
+| `device_agent_calls_total` | counter | `status` (`ok`, `tool_error`, `error`, `offline`, `turned_off`, `unknown_tool`, `timeout`, `gone_offline`, `revoked`, `token_revoked`, `cancelled`, `shutdown`) |
+| `agent_rate_limited_total` | counter | — (`/v1/agent/*` requests refused by the per-token limit) |
 | `db_pool_size`, `db_pool_idle` | gauge | — (refreshed on scrape) |
 | `process_uptime_seconds` | gauge | — |
 
@@ -173,7 +181,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 The installer swaps the binary atomically, runs `migrate`, restarts and waits for health.
 Migrations are forward-only; take a DB backup first. Downgrading across a migration is not
 supported (for the 0.11.0 canvas move there is a documented rollback:
-[canvas-migration.md](canvas-migration.md#rollback)). Clients reconnect automatically (SSE and
+[canvas-migration.md](canvas-migration.md#rollback); for 0.13.0: [v0.13.0.md](v0.13.0.md#rollback)). Clients reconnect automatically (SSE and
 canvas WebSockets drop during restart).
 
 **Upgrading from 0.10.x or older to 0.11.0** moves canvases to a Canvas Cloud: follow the runbook in

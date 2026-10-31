@@ -115,6 +115,45 @@ pub struct Config {
     /// Test-only SSO endpoint overrides. Never read from the config file or the environment.
     #[doc(hidden)]
     pub sso_test: SsoTestHooks,
+    /// Device-agent relay timings and limits (fixed by the relay contract; tests shorten them).
+    /// Never read from the config file or the environment.
+    #[doc(hidden)]
+    pub device_agent: DeviceAgentTuning,
+}
+
+/// Timings and limits of the device-agent relay (`/v1/me/links`, `/v1/agent/*`). The defaults
+/// are the documented contract and the only production behaviour; integration tests shorten
+/// them so a deadline or an offline device can be exercised in about a second.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct DeviceAgentTuning {
+    /// How long a relayed `tools/call` waits for the device's reply (200 s).
+    pub relay_deadline: std::time::Duration,
+    /// `: keepalive` comment interval on an agent's SSE answer (10 s).
+    pub agent_keepalive: std::time::Duration,
+    /// `ping` event interval on a device's frames stream (15 s).
+    pub device_ping: std::time::Duration,
+    /// A link is online while its stream is open and it was heard from this recently (45 s).
+    pub online_window: std::time::Duration,
+    /// A pending call fails once its device has been offline this long (15 s), instead of
+    /// waiting out the whole deadline.
+    pub offline_grace: std::time::Duration,
+    /// Requests per minute per agent token on `/v1/agent/*` (600).
+    pub agent_per_minute: u32,
+}
+
+impl Default for DeviceAgentTuning {
+    fn default() -> Self {
+        use std::time::Duration;
+        Self {
+            relay_deadline: Duration::from_secs(200),
+            agent_keepalive: Duration::from_secs(10),
+            device_ping: Duration::from_secs(15),
+            online_window: Duration::from_secs(45),
+            offline_grace: Duration::from_secs(15),
+            agent_per_minute: 600,
+        }
+    }
 }
 
 /// Lets integration tests point SSO at a local fake provider. Not configurable by operators:
@@ -145,6 +184,7 @@ impl fmt::Debug for Config {
             .field("log_format", &self.log_format)
             .field("log_level", &self.log_level)
             .field("sso_test", &self.sso_test)
+            .field("device_agent", &self.device_agent)
             .finish()
     }
 }
@@ -504,6 +544,7 @@ impl Config {
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "info".into()),
             sso_test: SsoTestHooks::default(),
+            device_agent: DeviceAgentTuning::default(),
         })
     }
 
@@ -534,6 +575,7 @@ impl Config {
             log_format: LogFormat::Pretty,
             log_level: "info".into(),
             sso_test: SsoTestHooks::default(),
+            device_agent: DeviceAgentTuning::default(),
         }
     }
 

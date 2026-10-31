@@ -752,8 +752,8 @@ async fn rename_device(
     Ok(Json(device))
 }
 
-/// Remove a device: revokes its sessions (FK cascade) and deletes its `tabs:<id>` doc
-/// and that doc's revisions.
+/// Remove a device: revokes its sessions (FK cascade), deletes its `tabs:<id>` doc and that
+/// doc's revisions, and turns off its device-agent link and agent tokens.
 async fn delete_device(
     State(state): State<SharedState>,
     user: AuthUser,
@@ -779,7 +779,18 @@ async fn delete_device(
         .execute(&mut *tx)
         .await?;
     }
+    let agent = crate::device_agent::revoke_device(&mut tx, &[user.user_id], id).await?;
     tx.commit().await?;
+    agent.apply(&state.device_agent);
+    if !agent.is_empty() {
+        tracing::info!(
+            user_id = %user.user_id,
+            device_id = %id,
+            links = agent.links.len(),
+            agent_tokens = agent.tokens.len(),
+            "deleted device's agent link and tokens revoked"
+        );
+    }
     Ok(Json(json!({ "ok": true })))
 }
 

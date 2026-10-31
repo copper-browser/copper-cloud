@@ -21,8 +21,9 @@ use crate::state::SharedState;
 pub const INSTANCE_HEADER: &str = "x-copper-instance";
 
 /// A `/v1` route reachable without the gate header: the pairing code is the credential
-/// (rate limited by the auth limiter). The SSO routes ([`crate::sso::is_sso_path`]) and
-/// [`crate::agents::AGENT_PAIR_PATH`] are ungated too.
+/// (rate limited by the auth limiter). The SSO routes ([`crate::sso::is_sso_path`]),
+/// [`crate::agents::AGENT_PAIR_PATH`] and the device-agent relay's agent side
+/// ([`crate::device_agent::is_agent_path`]) are ungated too.
 pub const PAIR_PATH: &str = "/v1/auth/pair";
 
 /// Query parameter that may carry the gate credential on a canvas room socket
@@ -49,6 +50,9 @@ pub const FEATURES: &[&str] = &[
     // `GET /v1/sync/docs/{domain}/revisions` (+ `/{version}`, `/{version}/restore`) and the
     // optional `X-Copper-Build` header on doc writes (0.12.0).
     "doc_revisions",
+    // Device agent relay: `/v1/me/links` (+ `/{id}/frames`), `/v1/me/agent-tokens` and the
+    // ungated `GET /v1/agent/status` + `POST /v1/agent/mcp` (0.13.0).
+    "device_agent",
 ];
 
 /// Core `/v1` routes (auth, pairing, devices, sync, intelligence, info). Paths are relative to `/v1`.
@@ -62,6 +66,7 @@ pub fn router() -> Router<SharedState> {
         .merge(crate::sync::routes())
         .merge(crate::intelligence::routes())
         .merge(crate::addons::routes())
+        .merge(crate::device_agent::routes())
 }
 
 /// The complete HTTP app for the canvas/core test suites: `/healthz` + `/v1/*` (core routes
@@ -130,13 +135,15 @@ async fn info(
 }
 
 /// Whether `path` is behind the instance gate: everything under `/v1` except [`PAIR_PATH`],
-/// the SSO routes and [`crate::agents::AGENT_PAIR_PATH`] (each carries its own credential or
-/// none at all). `/healthz`, `/admin/api/*` (own cookie auth) and the portal are not.
+/// the SSO routes, [`crate::agents::AGENT_PAIR_PATH`] and `/v1/agent/*` (each carries its own
+/// credential or none at all). `/healthz`, `/admin/api/*` (own cookie auth) and the portal
+/// are not.
 pub fn is_gated(path: &str) -> bool {
     (path == "/v1" || path.starts_with("/v1/"))
         && path != PAIR_PATH
         && path != crate::agents::AGENT_PAIR_PATH
         && !crate::sso::is_sso_path(path)
+        && !crate::device_agent::is_agent_path(path)
 }
 
 /// Whether `path` is a canvas room socket, `/v1/canvases/{id}/ws`.
@@ -351,6 +358,10 @@ mod tests {
             "/v1/auth/pairing",
             "/v1/auth/sso/google/x",
             "/v1/agents",
+            "/v1/agentx",
+            "/v1/me/links",
+            "/v1/me/links/0192aa/frames",
+            "/v1/me/agent-tokens",
             "/v1/x",
         ] {
             assert!(is_gated(p), "{p}");
@@ -361,6 +372,9 @@ mod tests {
             "/v1/auth/sso",
             "/v1/auth/sso/google",
             "/v1/agents/pair",
+            "/v1/agent",
+            "/v1/agent/status",
+            "/v1/agent/mcp",
             "/admin/api/login",
             "/",
             "/keys",

@@ -1174,11 +1174,17 @@ async fn delete_device(
         .execute(&mut *tx)
         .await?;
     }
-    let detail = if let [user] = users.as_slice() {
+    // Its device-agent link and agent tokens are turned off with it.
+    let agent = copper_cloud_core::device_agent::revoke_device(&mut tx, &users, id).await?;
+    let mut detail = if let [user] = users.as_slice() {
         json!({ "user_id": user })
     } else {
         json!({ "user_ids": users })
     };
+    if !agent.is_empty() {
+        detail["revoked_agent_links"] = json!(agent.links.len());
+        detail["revoked_agent_tokens"] = json!(agent.tokens.len());
+    }
     audit(
         &mut *tx,
         s.admin_id,
@@ -1188,6 +1194,7 @@ async fn delete_device(
     )
     .await?;
     tx.commit().await?;
+    agent.apply(&state.device_agent);
     Ok(Json(json!({ "ok": true, "deleted": users.len() })))
 }
 
