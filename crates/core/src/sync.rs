@@ -52,7 +52,7 @@ const DEFAULT_HISTORY_LIMIT: usize = 500;
 /// SSE keepalive comment interval.
 pub const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 /// How often an open SSE stream re-checks that its session still exists.
-const SSE_REVALIDATE: Duration = Duration::from_secs(300);
+pub(crate) const SSE_REVALIDATE: Duration = Duration::from_secs(300);
 
 pub(crate) fn routes() -> Router<SharedState> {
     Router::new()
@@ -1147,7 +1147,7 @@ impl Drop for SubscriberGauge {
     }
 }
 
-async fn session_alive(db: &sqlx::PgPool, session_id: Uuid) -> bool {
+pub(crate) async fn session_alive(db: &sqlx::PgPool, session_id: Uuid) -> bool {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND expires_at > now())",
     )

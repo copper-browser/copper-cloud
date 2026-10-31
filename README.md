@@ -22,7 +22,9 @@ People can join with **company single sign-on** (Google Workspace or any OpenID 
 provider): share one `https://HOST/start` page, they install Copper and click *Continue with
 Google* — no account to create, no password ([docs/sso.md](docs/sso.md)). **Agent
 integrations** let a trusted service pair headless Coppers (e.g. one per bot) to its owners'
-accounts ([docs/sso.md](docs/sso.md#agent-integrations)).
+accounts ([docs/sso.md](docs/sso.md#agent-integrations)). The **device agent relay** lets an
+agent (any MCP client) use a person's Copper for iOS while it is open on their screen, through
+`/v1/agent/mcp` with a token the phone mints ([docs/api.md](docs/api.md#device-agent-relay)).
 
 ## Install on a VM (Ubuntu 22.04/24.04, Debian 12, Amazon Linux 2023, Fedora)
 
@@ -33,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/copper-cloud/main/in
 or from a release tarball:
 
 ```sh
-tar xzf copper-cloud-0.12.0-linux-x86_64.tar.gz && sudo ./install.sh
+tar xzf copper-cloud-0.13.0-linux-x86_64.tar.gz && sudo ./install.sh
 ```
 
 The installer sets up Postgres (unless you pass `DATABASE_URL`), a `copper-cloud` system user,
@@ -133,6 +135,7 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
 
 - [Architecture](docs/architecture.md) — components, data model, request path
 - [HTTP API](docs/api.md) — every endpoint with requests and responses
+- [Changelog](CHANGELOG.md) — what changed in each release
 - [Admin API](docs/admin-api.md) — the admin portal's `/admin/api/*` contract
 - [Addons](docs/addons.md) — slot addons: manifest, bundles, who gets what, API, CLI, security
 - [Canvas link](docs/canvas-link.md) — how canvases are served by a linked Canvas Cloud:
@@ -147,7 +150,7 @@ All commands take `--config PATH` (default `/etc/copper-cloud/copper-cloud.toml`
 - [Operations](docs/operations.md) — doctor, logs, metrics, backups, upgrades
 - [Onboarding a team](docs/onboarding.md) — single sign-on first, link codes, people, keeping links valid
 - [Single sign-on + agent integrations](docs/sso.md) — Google / OIDC setup, `/start`, agent pairing
-- [v0.12.0 release notes](docs/v0.12.0.md) · [v0.11.1](docs/v0.11.1.md) · [v0.11.0](docs/v0.11.0.md) · [v0.10.0](docs/v0.10.0.md) · [v0.9.0](docs/v0.9.0.md) · [v0.8.1](docs/v0.8.1.md) · [v0.8.0](docs/v0.8.0.md) · [v0.7.0](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
+- [v0.13.0 release notes](docs/v0.13.0.md) · [v0.12.0](docs/v0.12.0.md) · [v0.11.1](docs/v0.11.1.md) · [v0.11.0](docs/v0.11.0.md) · [v0.10.0](docs/v0.10.0.md) · [v0.9.0](docs/v0.9.0.md) · [v0.8.1](docs/v0.8.1.md) · [v0.8.0](docs/v0.8.0.md) · [v0.7.0](docs/v0.7.0.md) · [v0.6.0](docs/v0.6.0.md) · [v0.5.0](docs/v0.5.0.md) · [v0.4.0](docs/v0.4.0.md) · [v0.3.0](docs/v0.3.0.md)
 
 ## Development
 

@@ -20,8 +20,9 @@ compromised server process or host, key rotation, multi-instance HA.
 
 ### Gate: instance key or access key
 
-Every `/v1` request except `POST /v1/auth/pair` must carry `X-Copper-Instance`. Without an
-accepted credential the server answers `401 {"error":"instance_key"}` for every `/v1` path —
+Every `/v1` request except `POST /v1/auth/pair` (and the other ungated routes: single sign-on,
+`POST /v1/agents/pair` and the device agent relay's `/v1/agent/*`, each with its own credential)
+must carry `X-Copper-Instance`. Without an accepted credential the server answers `401 {"error":"instance_key"}` for every `/v1` path —
 unknown routes included — and never reads request bodies. Two kinds of credential:
 
 - **Instance key** — one shared secret per instance, ≥ 32 characters of `[A-Za-z0-9-_.~]`
@@ -317,6 +318,28 @@ integration paired: their sessions are deleted and their gate keys revoked. Re-p
 replaces its previous session and gate key, so a leaked session for an agent device dies at
 the next pairing. Every pairing and every key change is audited. The route is not rate
 limited, because the key is unguessable, and it is checked by shape before any database lookup.
+
+## Device agent relay
+
+An agent token (`cat_` + 256 random bits, stored as SHA-256, shown once) lets an agent drive one
+person's Copper for iOS through `/v1/agent/*` (0.13.0): it acts as that person in their
+signed-in tabs, so it is as powerful as the phone's browser while Copper is open on screen.
+
+- **Bound and narrow.** A token is minted by a signed-in device for itself and works only for
+  that user and device; it is not a session and opens no other route. The route is outside the
+  instance gate (the token is the credential), checked by shape before any database lookup, and
+  limited to 600 requests a minute per token. Tokens are read from the `Authorization` header
+  only, never a query string.
+- **The person stays in control.** Calls reach the phone only while Copper is open on its screen
+  and the person has turned agents on (the phone holds the stream); every call is announced on
+  the page with Stop. Revoking a token, revoking the link or deleting the device takes effect at
+  once: calls in flight fail and the device gets a `cancel`. A disabled account's tokens stop
+  working.
+- **Devices only feed their own link.** Only the link's own device (its session) may open or
+  post to its frames; a reply is matched to the request id and the link it was sent to.
+- **Nothing about calls is stored.** One log line per call (token id, device id, tool, duration,
+  outcome); arguments, results, progress text and tokens are never logged. Device `log` frames
+  are written at debug level only.
 
 ## Reporting
 

@@ -12,6 +12,7 @@ pub mod auth;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod device_agent;
 pub mod error;
 pub mod events;
 pub mod extract;

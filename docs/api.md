@@ -5,7 +5,7 @@ RFC 3339 UTC strings. IDs are UUIDs (v7 for server-generated ones).
 
 ## Conventions
 
-### Gate credential (every `/v1` request except `POST /v1/auth/pair`, the SSO routes and `POST /v1/agents/pair`)
+### Gate credential (every `/v1` request except `POST /v1/auth/pair`, the SSO routes, `POST /v1/agents/pair` and `/v1/agent/*`)
 
 ```
 X-Copper-Instance: <instance key | access key>
@@ -49,7 +49,8 @@ Always `{"error": "<code>", "message": "<text>"}`:
 | 401 | `instance_key` / `session` / `credentials` / `account_disabled` / `pairing_code` | see above |
 | 401 | `sso_only` | password login for an account that only signs in with SSO |
 | 401 | `sso_failed` / `agent_key` | SSO code exchange or ID-token check failed; bad agent-integration key |
-| 403 | `forbidden` | signup disabled; writing another device's `tabs:` doc |
+| 401 | `agent_token` | `/v1/agent/*`: missing, malformed, unknown or revoked `cat_` token ([device agent relay](#device-agent-relay)) |
+| 403 | `forbidden` | signup disabled; writing another device's `tabs:` doc; opening or feeding another device's link frames |
 | 403 | `password_signin_disabled` | password signup/login turned off by the admin (use SSO) |
 | 403 | `sso_domain` / `sso_no_account` / `agent_domain` / `account_disabled` | email domain not allowed; no account and auto-create off; disabled account (SSO, agent pairing) |
 | 404 | `sso_disabled` / `no_account` | SSO provider not set up / disabled; agent pairing for a missing account with `create_users` off |
@@ -58,7 +59,8 @@ Always `{"error": "<code>", "message": "<text>"}`:
 | 404 | `link_not_found` | unknown, revoked, or deleted-canvas share link |
 | 409 | `conflict` | email taken; stale `base_version` (body carries the server copy) |
 | 413 | `payload_too_large` | body or payload over the configured limit |
-| 429 | `rate_limited` | auth rate limit, or a per-user limit (mentions, history delete) (header `Retry-After: 60`) |
+| 405 | `method_not_allowed` | `GET` / `DELETE /v1/agent/mcp` (no event stream, no session) |
+| 429 | `rate_limited` | auth rate limit, a per-user limit (mentions, history delete) or the per-token agent limit (header `Retry-After: 60`) |
 | 500 | `internal` | server bug / database failure (details only in server logs) |
 | 502 | `canvas_upstream` | canvas routes only: the linked Canvas Cloud is unreachable, timed out, or rejected the app key ([canvas-link.md](canvas-link.md#status-codes)) |
 | 503 | `canvas_unavailable` | canvas routes only: no Canvas Cloud is linked |
@@ -76,7 +78,8 @@ includes the ungated `POST /v1/auth/pair` and `POST /v1/auth/sso/{provider_id}`.
 Behind a proxy set `trust_proxy = true` so the right-most `X-Forwarded-For` hop is used.
 `POST /v1/canvases/{id}/mentions` has its own per-user bucket (60 per minute, bursts of 60), and
 `DELETE /v1/sync/history` another (20 per minute, bursts of 20; requests rejected with `400` or
-`413` do not count).
+`413` do not count). `/v1/agent/*` is limited per agent token: 600 requests per minute (bursts of
+600, then one every 100 ms).
 
 ### Request size limits
 
@@ -86,6 +89,9 @@ Behind a proxy set `trust_proxy = true` so the right-most `X-Forwarded-For` hop 
 | `PUT /v1/sync/docs/{domain}` | base64 of `limits.max_blob_bytes` (8 MB decoded) + 4 KiB |
 | `POST /v1/sync/history` | `max_history_batch` × (`max_history_entry_bytes` + 8) (≤ 64 MiB) |
 | `DELETE /v1/sync/history` | 256 KiB (room for 5000 `seqs`) |
+| `POST /v1/me/links` | 1 MiB (the `tools` manifest itself: 256 KiB) |
+| `POST /v1/me/links/{id}/frames` | 32 MiB (replies may carry screenshots) |
+| `POST /v1/agent/mcp` | 4 MiB |
 
 Bodies must arrive within 60 s. `Content-Type` is not required.
 
@@ -128,6 +134,8 @@ only ever grows, and an absent field (older servers) means none of them:
 | `agent_pairing` | 0.9.0 | [`POST /v1/agents/pair`](#post-v1agentspair--no-gate-header) and device-bound pairing codes |
 | `addons` | 0.10.0 | [`GET /v1/addons`](#addons) and the `addons` event |
 | `canvas_link` | 0.11.0 | canvases are served by a linked Canvas Cloud through this server ([canvas-link.md](canvas-link.md)); the canvas API itself is unchanged |
+| `doc_revisions` | 0.12.0 | [doc revisions](#doc-revisions-features-doc_revisions) and the optional `X-Copper-Build` header |
+| `device_agent` | 0.13.0 | the [device agent relay](#device-agent-relay): `/v1/me/links` (+ frames), `/v1/me/agent-tokens`, and the ungated `GET /v1/agent/status` + `POST /v1/agent/mcp` |
 
 `canvas` (0.11.0+): `linked` is `true` while a Canvas Cloud is linked and enabled. When it is
 `false`, every canvas route answers `503 canvas_unavailable`. It says nothing about
@@ -437,7 +445,9 @@ Most recently seen first.
 
 ### `DELETE /v1/devices/{id}`
 
-Revokes the device's sessions and deletes its `tabs:<id>` doc. `200 {"ok": true}`.
+Revokes the device's sessions, deletes its `tabs:<id>` doc, and turns off its
+[device agent](#device-agent-relay) link (its stream closes with `revoked`) and agent tokens.
+`200 {"ok": true}`.
 
 ---
 
@@ -811,6 +821,210 @@ The served bundle (`application/json`, `copper-addon-bundle/1`; [format](addons.
 only while that addon version is what `GET /v1/addons` resolves for the caller — otherwise
 `404`. `Cache-Control: private, max-age=31536000, immutable`, `ETag: "<sha256>"`. Check that
 SHA-256 of the body equals `{sha256}` before using it.
+
+---
+
+## Device agent relay
+
+(`features`: `device_agent`, 0.13.0.) An agent — phi, Claude Code, any MCP client or plain
+`curl` — calls the tools of a person's Copper for iOS through this server. The phone dials out
+and holds an event stream while Copper is open; the server hands it each call and returns its
+reply. Nothing listens on the phone.
+
+```text
+agent ── POST /v1/agent/mcp (cat_ token) ──▶ copper-cloud ── SSE "request" ──▶ Copper on iPhone
+agent ◀── JSON-RPC result (JSON or SSE) ──── copper-cloud ◀── POST frames "reply" ── iPhone
+```
+
+Which links are online and the calls in flight live in memory (one daemon per instance); links
+and tokens are stored (`device_links`, `agent_tokens`).
+
+### Device side 🔒
+
+Gate credential + session, like every user route. A link belongs to the calling session's
+device; one link per (user, device).
+
+#### `POST /v1/me/links`
+
+Register (or update) this device's link and its tool manifest.
+
+```json
+{ "label": "Ada's iPhone", "client_version": "ios-1.0.0",
+  "tools": [ { "name": "jev_run", "description": "…", "inputSchema": { "type": "object" } } ] }
+```
+
+`200` — the link object (every link route returns it):
+
+```json
+{ "id": "uuid", "device_id": "uuid", "device_name": "Ada's iPhone", "label": "Ada's iPhone",
+  "online": false, "revoked": false, "created_at": "2026-10-31T20:00:00Z", "last_seen_at": null,
+  "tools": 22 }
+```
+
+- Idempotent: the same device always gets the same link id, and a revoked link comes back
+  un-revoked. Omitted fields keep their stored value (a new link: `label` = the device name, no
+  tools). `label` ≤ 100 characters and `client_version` ≤ 64 (longer values are cut).
+- `tools` is stored as sent and served to agents by `tools/list`, so an agent can list tools
+  while the phone is closed. `400` unless it is an array of at most 100 objects, each with a
+  unique, non-empty `name` (≤ 128 characters), and at most 256 KiB as JSON.
+- In the link object, `tools` is how many tools the manifest has; `online` is whether its stream
+  is open and the device was heard from in the last 45 s; `last_seen_at` is when it last opened
+  or closed its stream or uploaded frames (refreshed at most every 30 s while online).
+
+#### `GET /v1/me/links` · `GET /v1/me/links/{id}` · `DELETE /v1/me/links/{id}`
+
+- `GET /v1/me/links`: the user's live (not revoked) links, oldest first.
+- `GET /v1/me/links/{id}`: one link, revoked included.
+- `DELETE /v1/me/links/{id}`: revoke it (any of the user's devices may). Its stream gets
+  `revoked` and closes, its calls in flight fail, and every agent call answers "turned off" until
+  the device registers again. Idempotent; `200 {"ok": true}`.
+
+All three answer `404` for another user's link. Deleting the device
+([`DELETE /v1/devices/{id}`](#delete-v1devicesid)) revokes its link too.
+
+#### `GET /v1/me/links/{id}/frames` — SSE mailbox
+
+Only the link's own device may open it (`403` from the user's other devices, `404` for another
+user's link). `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering:
+no`. A new stream supersedes the previous one (which gets `superseded` and closes). Each `data:`
+is one JSON object:
+
+| event | data |
+|---|---|
+| `hello` | `{"link": {…link object…}, "protocol": 1}` — always first |
+| `request` | `{"id": "req_…", "method": "tools/call", "params": {"name": "jev_run", "arguments": {…}}, "caller": {"token_id": "uuid", "label": "phi"}, "deadline_ms": 200000}` |
+| `cancel` | `{"id": "req_…"}` — the agent went away, timed out or was revoked; stop that call |
+| `ping` | `{}` every 15 s |
+| `superseded` | `{}`, then the stream closes; do not reconnect from this stream |
+| `revoked` | `{}`, then the stream closes; the user turned the link off |
+
+Opening a revoked link's stream answers `hello` (`"revoked": true`), then `revoked`, then closes.
+The stream also ends on server shutdown and when the session is revoked (checked every 5 min).
+
+#### `POST /v1/me/links/{id}/frames`
+
+From the link's own device (`403` / `404` as above): `{"frames": [ … ]}`, body up to 32 MiB.
+`200 {"ok": true, "accepted": n}` — `n` = well-formed frames of a known type (malformed frames and
+unknown types are skipped; a reply for an unknown or finished request is accepted and ignored).
+`400` if the body is not `{"frames": [...]}`.
+
+| frame | shape |
+|---|---|
+| reply | `{"type": "reply", "id": "req_…", "result": {"content": [...], "isError": false}}` or `{"type": "reply", "id": "req_…", "error": {"code": "…", "message": "…"}}` |
+| progress | `{"type": "progress", "id": "req_…", "seq": 3, "message": "3 · CLICK [12] button \"Search\""}` — `seq` must grow (a stale or repeated one is ignored; a frame without one counts as the next); messages over 16 KiB are cut |
+| heartbeat | `{"type": "heartbeat"}` every 15 s while the stream is open |
+| log | `{"type": "log", "level": "info", "message": "…"}` — logged at debug, never stored |
+
+A link is **online** while its stream is open and the device was heard from — stream opened,
+heartbeat or any other frames POST — within the last 45 s. The phone closes its stream when
+Copper leaves the screen.
+
+#### Agent tokens: `POST /v1/me/agent-tokens` · `GET /v1/me/agent-tokens` · `DELETE /v1/me/agent-tokens/{id}`
+
+Minted by the phone for one agent; bound to the minting user and device.
+
+```json
+// POST body (optional; label defaults to "Agent", ≤ 100 characters)
+{ "label": "phi" }
+// 201
+{ "id": "uuid", "token": "cat_<43 base64url chars>", "label": "phi", "device_id": "uuid",
+  "created_at": "2026-10-31T20:00:00Z", "mcp_url": "https://cloud.example.com/v1/agent/mcp" }
+```
+
+- The token (`cat_` + 32 random bytes, base64url) is in this response only; the server stores
+  SHA-256(token). At most 100 live tokens per user (`400` beyond: revoke some).
+- `mcp_url` is built from the instance's public URL (with ACME, from `tls.domain`). The agent's
+  HTTP client must trust the certificate: use ACME or a TLS-terminating proxy, or trust a
+  self-signed instance's certificate explicitly.
+- `GET` lists the user's live tokens, newest first:
+  `[{"id", "label", "device_id", "created_at", "last_used_at"}]` — never the token
+  (`last_used_at` is refreshed at most once a minute).
+- `DELETE` revokes at once: the next agent request is `401`, and its calls in flight fail and get
+  a `cancel` on the device. Idempotent; `200 {"ok": true}`; `404` if not yours. Deleting the
+  device revokes its tokens too.
+
+### Agent side: `cat_` token, no gate header
+
+```
+Authorization: Bearer cat_<43 chars>
+```
+
+`/v1/agent/*` is outside the instance gate: the 256-bit token is the credential (a gate header,
+if sent, is ignored). A missing, malformed, unknown or revoked token — or one whose account is
+disabled or whose device was deleted — is `401 {"error":"agent_token"}`. The token is read from
+the `Authorization` header only. 600 requests per minute per token (`429 rate_limited`).
+
+#### `GET /v1/agent/status`
+
+```json
+{ "device": { "id": "uuid", "name": "Ada's iPhone" }, "label": "Ada's iPhone", "online": true,
+  "last_seen_at": "2026-10-31T20:00:00Z", "tools": 22 }
+```
+
+`online` is `false` when the link is offline, revoked, or was never registered (then `label` and
+`last_seen_at` are `null` and `tools` is `0`). `Cache-Control: no-store`.
+
+#### `POST /v1/agent/mcp` — MCP Streamable HTTP (stateless)
+
+One JSON-RPC 2.0 message per request. A batch (JSON array), invalid JSON, or a message without a
+`method` that is not a response is `400` with a JSON-RPC error (`-32600` / `-32700`,
+`"id": null`). No `Mcp-Session-Id` is needed or returned. `GET` and `DELETE` (with a valid token)
+answer `405 method_not_allowed` with `Allow: POST`: there is no server-initiated stream.
+
+| method | answer |
+|---|---|
+| `initialize` | `{"protocolVersion": <the client's if one of 2025-06-18 / 2025-03-26 / 2024-11-05, else 2025-06-18>, "capabilities": {"tools": {"listChanged": false}}, "serverInfo": {"name": "copper-mobile", "version": "<server version>"}, "instructions": "<how to drive the phone, Jev first>"}` |
+| `notifications/*` (also any other message without an `id`, and responses) | `202`, empty body |
+| `ping` | `{}` |
+| `tools/list` | `{"tools": [...]}` — the manifest the device last registered (empty if none), also while it is offline or turned off |
+| `tools/call` | relayed to the device (below) |
+| anything else | JSON-RPC error `-32601` |
+
+`tools/call` (`params.name` required and `params.arguments` an object when present, else
+`-32602`):
+
+- **Turned off** (link revoked or never registered): at once, `isError: true` with "Agents are
+  turned off on <device name>. Ask the person to turn on Settings › Agents › Let agents use this
+  iPhone in Copper, then try again."
+- **Not in the manifest**: at once, `isError: true` naming the tool.
+- **Offline**: at once, `{"content": [{"type": "text", "text": "Copper isn't open on <device
+  name>. Ask the person to open Copper on their iPhone and keep it on screen (Settings › Agents ›
+  Let agents use this iPhone must be on), then try again."}], "isError": true}`.
+- Otherwise the device gets a `request` frame (deadline 200 s) and the server waits for its
+  reply. A reply's `result` is the JSON-RPC result as sent; a reply `error` becomes
+  `isError: true` with its message. A deadline miss sends `cancel` to the device and answers
+  `isError: true` ("… timed out …"). If the device is offline for 15 s while the call runs
+  (Copper left the screen), the call is cancelled and answers `isError: true` then, instead of
+  waiting out the deadline. Revoking the link or the token mid-call, or a server shutdown,
+  answers `isError: true` too.
+- With `text/event-stream` in the request's `Accept`, the answer is an SSE stream
+  (`Cache-Control: no-store`, `X-Accel-Buffering: no`): a `: keepalive` comment after every 10 s
+  of silence (proxies drop idle requests at 60 s), an `event: message` with
+  `notifications/progress` (`{"progressToken": <the call's>, "progress": <seq>, "message": "…"}`)
+  for each device progress frame when the call carried `params._meta.progressToken`, then an
+  `event: message` with the JSON-RPC response, and the stream ends. Otherwise one
+  `application/json` response (progress is not delivered). Every other method answers
+  `application/json`.
+- The agent disconnecting mid-call (closing the request or the stream) sends `cancel` to the
+  device.
+- One log line per call — token id, device id, tool name, duration (`ms`), outcome (`status`) —
+  and a `device_agent_calls_total{status}` count. Never arguments or results.
+
+The `initialize` instructions tell the agent that this is the person's Copper on their iPhone,
+signed in as them; that it only works while Copper is open on their screen; to reach for
+`jev_run` first (the whole goal with concrete values and a stop condition; `DONE` is Jev's claim,
+verified with `jev_observe` / `jev_extract`), then `browser_snapshot` / `browser_click` /
+`browser_type` for whatever Jev is `BLOCKED` on.
+
+```sh
+# The phone minted $CAT for this agent; no gate header needed.
+curl -s https://cloud.example.com/v1/agent/status -H "Authorization: Bearer $CAT"
+curl -sN https://cloud.example.com/v1/agent/mcp -H "Authorization: Bearer $CAT" \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"jev_run",
+       "arguments":{"goal":"Open example.com and read the headline; stop when it is visible"},
+       "_meta":{"progressToken":1}}}'
+```
 
 ---
 

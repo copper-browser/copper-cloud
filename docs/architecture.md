@@ -27,7 +27,7 @@ copper-cloud proxies the canvas API to it as the signed-in user — see [canvas-
 | Crate | Role |
 |---|---|
 | `crates/copper-cloud` (bin + lib) | CLI (clap), `serve` bootstrap, graceful shutdown, `doctor`, `admin`, admin API (`/admin/api`), `/start` onboarding page, embedded admin portal (rust-embed of `portal/out`), migrations dir |
-| `crates/core` (`copper-cloud-core`) | config, db pool + embedded migrations, crypto, access mode + access keys + gate, auth extractor + routes, pairing codes, single sign-on (`sso`), agent integrations (`agents`), sync docs/history/SSE, cloud-wide intelligence keys, events, TLS, link codes, observability, app composition |
+| `crates/core` (`copper-cloud-core`) | config, db pool + embedded migrations, crypto, access mode + access keys + gate, auth extractor + routes, pairing codes, single sign-on (`sso`), agent integrations (`agents`), the device agent relay (`device_agent`: links, frames, agent tokens, MCP endpoint, in-memory hub), sync docs/history/SSE, cloud-wide intelligence keys, events, TLS, link codes, observability, app composition |
 | `portal/` | Next.js static export (the admin portal), built with bun into `portal/out` before cargo in CI/release |
 | `crates/canvas-link` (`copper-cloud-canvas-link`) | the canvas link: settings (sealed app key), REST proxy + WebSocket pipe to Canvas Cloud, event bridge, user provisioning (batch, JIT, reconcile, outbox), `/join/{token}` landing page, `GET /v1/info` `canvas` field, admin/CLI/doctor helpers (see [canvas-link.md](canvas-link.md)) |
 | `crates/canvas-migrate` (`copper-cloud-canvas-migrate`) | `copper-cloud canvas migrate`: reads the legacy canvas tables, streams them to Canvas Cloud's import, verifies by digest (see [canvas-migration.md](canvas-migration.md)) |
@@ -51,7 +51,7 @@ Router
 │         link.router(): /canvases, /canvases/{*rest}, /people, /invites, /invites/{*rest},
 │         /canvas-links/{*rest}, /mentions, /mentions/{*rest} (any method) → Canvas Cloud
 │         ungated: POST /v1/auth/pair, GET /v1/auth/sso, POST /v1/auth/sso/{id},
-│                  POST /v1/agents/pair (each carries its own credential or none)
+│                  POST /v1/agents/pair, /v1/agent/* (each carries its own credential or none)
 ├── /admin/api = admin_api::router()   (cookie sessions + CSRF header; fallback → 404 JSON)
 ├── GET /start, GET /join/{token}      (server-rendered landing pages, not gated)
 └── fallback → portal::serve           (embedded portal/out; /v1x, /metrics… → 404 JSON)
@@ -90,6 +90,8 @@ it. The query string is never logged (it can carry `?token=`).
 | `sso_providers` | `id` (`google` or a slug) | `kind` google/oidc, `client_id`, sealed `client_secret_sealed` under `data_key_wrapped`, `issuer?` (OIDC), `domains[]`, `auto_create`, `enabled` |
 | `user_identities` | `(provider_id, subject)` | SSO identity → `user_id` link, last reported `email`, `last_login_at` |
 | `agent_integrations` | `id`; `key_sha256` unique | `cai_` key hash, `name`, `domains[]`, `create_users`, `last_used_at`, `revoked_at` |
+| `device_links` | `id`; `(user_id, device_id)` unique | device agent links: `label`, `client_version`, `tools` (jsonb manifest), `last_seen_at`, `revoked_at` (set by revoke or device delete; no FK to `devices`) |
+| `agent_tokens` | `id`; `token_sha256` unique | `cat_` token hash bound to `(user_id, device_id)`, `label`, `last_used_at`, `revoked_at` |
 | `intelligence_settings` | `id` = 1 (singleton) | cloud-wide AI keys: `data_key_wrapped`, sealed `jev_key_sealed` / `router_key_sealed`, `jev_endpoint`, `jev_model`, `router_url`, `enabled`, `agent_max_turns` (org agent round budget, 1–500 or NULL), `updated_at/by` |
 | `admins` | `id`; `lower(email)` unique | portal admin accounts (Argon2id), `last_login_at` |
 | `admin_sessions` | `id`; `token_sha256` unique | `cc_admin` cookie sessions, fixed 7-day `expires_at` |
@@ -126,6 +128,20 @@ once; shell CLI deletes: `copper-cloud canvas sync-users --prune`, never automat
   the canvas link's event bridge publishes `canvas` (from Canvas Cloud's app event stream). SSE streams turn them into `event:` frames with a 15 s
   keepalive comment; a lagging stream gets `resync`. Single-process by design (one daemon per
   instance).
+
+## Device agent relay
+
+An agent calls a person's Copper for iOS through `POST /v1/agent/mcp` (ungated, `cat_` token);
+the phone holds `GET /v1/me/links/{id}/frames` open while Copper is on screen and posts replies
+to the same path ([api.md](api.md#device-agent-relay)). The in-process `device_agent::Hub` (on
+`AppState`, like `Events`) maps each link to its current frames stream (`mpsc` sender, stream id,
+last heartbeat) and each request id (`req_…`) to the waiting call (`oneshot` for the reply,
+`mpsc` for progress). A call is handed down only if the link is online (stream open, heard from
+within 45 s); otherwise the agent is answered at once. The waiting side is a stream that owns a
+guard: dropping it — the JSON handler future or the SSE body, when the agent goes away — sends
+the device a `cancel`. Deadline (200 s), offline grace (15 s), revoke and shutdown end the call
+with an `isError` result. Links, manifests and token hashes are in Postgres; nothing about calls
+is stored, and the per-call log line never carries arguments or results.
 
 ## Encryption at rest
 
