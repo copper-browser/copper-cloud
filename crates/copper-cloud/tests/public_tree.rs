@@ -400,7 +400,7 @@ fn mit_license_ships() {
     assert!(license.starts_with("MIT License\n"), "LICENSE is MIT");
     assert!(license.contains("Permission is hereby granted, free of charge"));
     assert!(read("README.md").contains("[MIT](LICENSE)"));
-    let release = read(".github/workflows/release.yml");
+    let release = read("ci/release.sh");
     assert!(release.contains("cp LICENSE \"$stage/LICENSE\""));
     assert!(
         release
