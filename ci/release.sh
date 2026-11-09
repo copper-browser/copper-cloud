@@ -109,10 +109,11 @@ dist() {
 build() {
   need_tag
   rm -rf dist
+  export DO_NOT_TRACK=1 DAGGER_NO_NAG=1 DAGGER_NO_UPDATE_CHECK=1
   export _EXPERIMENTAL_DAGGER_RUNNER_HOST=${_EXPERIMENTAL_DAGGER_RUNNER_HOST:-unix:///run/dagger-engine/engine.sock}
   timeout 5400 dagger --progress=plain core container from --address="$RUST_IMAGE" \
     with-mounted-cache --path=/usr/local/cargo/registry --cache=copper-cloud-cargo-registry \
-    with-directory --path=/src --directory=. --exclude=.git,target,dist,.release-tools,portal/node_modules \
+    with-directory --path=/src --source=. --exclude=.git,target,dist,.release-tools,portal/node_modules \
     with-workdir --path=/src \
     with-env-variable --name=COPPER_CLOUD_GIT_SHA --value="${CI_COMMIT_SHA:-unknown}" \
     with-env-variable --name=CARGO_TERM_COLOR --value=never \
