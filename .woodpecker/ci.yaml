@@ -1,0 +1,45 @@
+# Roadrunner CI (Woodpecker + Dagger, https://cicd.apps.exowatt.com); port of
+# .github/workflows/ci.yml. The three steps run in parallel. `$$` escapes `$` for Woodpecker.
+# Native PostgreSQL only: --pg-admin-url gives the test step one isolated database (both test
+# harnesses share it: core uses `public`, canvas-migrate a schema per test).
+labels:
+  tier: "0"
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+  - event: manual
+    evaluate: 'RELEASE_TAG == nil || RELEASE_TAG == ""'
+steps:
+  - name: lint
+    image: bash
+    commands:
+      - >-
+        ci-dagger v0.10.1 rust --src=. --repo=copper-cloud --apt=shellcheck
+        --dep-cache=registry.dev.exowatt.com/cache --dep-cache-password=file:///etc/woodpecker/zot-ci-cache
+        --run='cargo fmt --all --check
+        && cargo clippy --workspace --all-targets --locked -j4 -- -D warnings
+        && shellcheck -s sh install.sh
+        && sh install.sh --print-unit | diff -u packaging/copper-cloud.service -'
+
+  - name: portal-lint
+    image: bash
+    commands:
+      - >-
+        ci-dagger v0.10.1 bun --src=. --repo=copper-cloud --bun=1.4.4 --install-dirs=portal
+        --dep-cache=registry.dev.exowatt.com/cache --dep-cache-password=file:///etc/woodpecker/zot-ci-cache
+        --run='cd portal && bun run lint && bun run typecheck'
+
+  - name: test
+    image: bash
+    commands:
+      - >-
+        ci-dagger v0.10.1 rust --src=. --repo=copper-cloud
+        --pg-admin-url=file:///etc/woodpecker/pg-ci-test-url
+        --database-env=DATABASE_URL,COPPER_CLOUD_TEST_DATABASE_URL,COPPER_CLOUD_TEST_MIGRATE_DATABASE_URL
+        --dep-cache=registry.dev.exowatt.com/cache --dep-cache-password=file:///etc/woodpecker/zot-ci-cache
+        --run='bash ci/release.sh portal
+        && cargo test --workspace --locked -j4 -- --test-threads=4
+        && cargo run --locked -j4 -q -- init-config --write /tmp/cc.toml --database-url "$$DATABASE_URL"
+        && cargo run --locked -j4 -q -- --config /tmp/cc.toml tls-init
+        && cargo run --locked -j4 -q -- --config /tmp/cc.toml link-code | grep -q "^copper-cloud://localhost:8443/#k="'
